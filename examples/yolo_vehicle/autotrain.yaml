@@ -1,0 +1,33 @@
+# AutoTrain config for vehicle detection (YOLO + KITTI)
+# Cost estimate: ~$0.15 for 50 iterations with Haiku
+
+agent:
+  provider: anthropic
+  model: claude-haiku-4-5-20251001
+  temperature: 0.3
+  hard_timeout_seconds: 180
+
+metric:
+  name: mAP
+  target: 0.80
+  direction: maximize
+
+budget:
+  time_seconds: 14400      # 4 hours
+  max_iterations: 50
+  api_dollars: 2.00         # Hard cap
+  experiment_timeout_seconds: 900  # 15 min per training run
+
+execution:
+  train_command: ".venv/bin/python train.py"
+  mode: ssh
+  ssh_host: blackbox
+  ssh_remote_dir: /home/holt/dev/object-det
+  gpu_device: "0"
+
+sandbox:
+  writable_files:
+    - train.py
+
+notify:
+  terminal: true
