@@ -274,12 +274,14 @@ class AgentClient:
         payload = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "temperature": self._temperature,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
         }
+        # Reasoner models don't support temperature
+        if "reasoner" not in self._model:
+            payload["temperature"] = self._temperature
 
         last_error = None
 
@@ -293,7 +295,10 @@ class AgentClient:
                 data = resp.json()
 
                 choice = data["choices"][0]
-                raw_text = choice["message"]["content"]
+                message = choice["message"]
+                # Reasoner models return reasoning_content + content;
+                # non-reasoner models just return content
+                raw_text = message.get("content") or ""
                 usage = data.get("usage", {})
                 input_tokens = usage.get("prompt_tokens", 0)
                 output_tokens = usage.get("completion_tokens", 0)

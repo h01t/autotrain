@@ -37,17 +37,13 @@ class MetricConfig(BaseModel):
     name: str
     target: float
     direction: Literal["maximize", "minimize"] = "maximize"
-    extraction_mode: Literal["json", "regex", "file"] = "json"
+    extraction_mode: Literal["json", "regex"] = "json"
     extraction_pattern: str | None = None
-    extraction_key: str | None = None
-    extraction_file: str | None = None
 
     @model_validator(mode="after")
     def validate_extraction(self):
         if self.extraction_mode == "regex" and not self.extraction_pattern:
             raise ValueError("extraction_pattern required when extraction_mode='regex'")
-        if self.extraction_mode == "file" and not self.extraction_file:
-            raise ValueError("extraction_file required when extraction_mode='file'")
         return self
 
 
@@ -90,6 +86,7 @@ class ExecutionConfig(BaseModel):
     ssh_remote_dir: str | None = None
     ssh_key: str | None = None
     ssh_port: int = 22
+    ssh_setup_command: str | None = None  # e.g. "uv sync", runs once before first training
     rsync_excludes: list[str] = Field(
         default_factory=lambda: [
             ".venv",
@@ -103,6 +100,13 @@ class ExecutionConfig(BaseModel):
             "*.onnx",
             "outputs",
             "runs",
+        ]
+    )
+    checkpoint_patterns: list[str] = Field(
+        default_factory=lambda: [
+            "outputs/training/*/weights/last.pt",
+            "outputs/training/*/weights/best.pt",
+            "**/checkpoint-*",
         ]
     )
 

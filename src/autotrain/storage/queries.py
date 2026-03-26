@@ -6,6 +6,8 @@ import sqlite3
 from datetime import UTC, datetime
 
 from autotrain.storage.models import (
+    EpochMetric,
+    GpuSnapshot,
     Iteration,
     IterationOutcome,
     JournalEntry,
@@ -70,6 +72,32 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> Run | None:
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
+
+
+def get_all_runs(conn: sqlite3.Connection) -> list[Run]:
+    """Get all runs, newest first."""
+    rows = conn.execute(
+        "SELECT * FROM runs ORDER BY created_at DESC"
+    ).fetchall()
+    return [
+        Run(
+            id=row["id"],
+            repo_path=row["repo_path"],
+            metric_name=row["metric_name"],
+            metric_target=row["metric_target"],
+            metric_direction=row["metric_direction"],
+            status=RunStatus(row["status"]),
+            best_metric_value=row["best_metric_value"],
+            best_iteration=row["best_iteration"],
+            total_iterations=row["total_iterations"],
+            total_api_cost=row["total_api_cost"],
+            git_branch=row["git_branch"],
+            config_snapshot=row["config_snapshot"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+        for row in rows
+    ]
 
 
 def get_latest_run(conn: sqlite3.Connection, repo_path: str | None = None) -> Run | None:
@@ -137,8 +165,9 @@ def create_iteration(conn: sqlite3.Connection, iteration: Iteration) -> int:
     cursor = conn.execute(
         """INSERT INTO iterations (run_id, iteration_num, state, outcome, metric_value,
            commit_hash, agent_reasoning, agent_hypothesis, changes_summary,
-           duration_seconds, api_cost, error_message, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           duration_seconds, api_cost, error_message, checkpoint_path,
+           resumed_from_checkpoint, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             iteration.run_id,
             iteration.iteration_num,
@@ -152,6 +181,8 @@ def create_iteration(conn: sqlite3.Connection, iteration: Iteration) -> int:
             iteration.duration_seconds,
             iteration.api_cost,
             iteration.error_message,
+            iteration.checkpoint_path,
+            int(iteration.resumed_from_checkpoint),
             iteration.created_at.isoformat(),
         ),
     )
@@ -168,7 +199,7 @@ def update_iteration(
     allowed = {
         "state", "outcome", "metric_value", "commit_hash", "agent_reasoning",
         "agent_hypothesis", "changes_summary", "duration_seconds", "api_cost",
-        "error_message",
+        "error_message", "checkpoint_path", "resumed_from_checkpoint",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
@@ -214,6 +245,7 @@ def get_best_iterations(
 
 
 def _row_to_iteration(row: sqlite3.Row) -> Iteration:
+    keys = row.keys()
     return Iteration(
         id=row["id"],
         run_id=row["run_id"],
@@ -228,6 +260,8 @@ def _row_to_iteration(row: sqlite3.Row) -> Iteration:
         duration_seconds=row["duration_seconds"],
         api_cost=row["api_cost"],
         error_message=row["error_message"],
+        checkpoint_path=row["checkpoint_path"] if "checkpoint_path" in keys else None,
+        resumed_from_checkpoint=bool(row["resumed_from_checkpoint"]) if "resumed_from_checkpoint" in keys else False,
         created_at=datetime.fromisoformat(row["created_at"]),
     )
 
@@ -271,6 +305,118 @@ def get_all_metric_snapshots(
         )
         for row in rows
     ]
+
+
+# --- Epoch Metrics ---
+
+
+def record_epoch_metric(
+    conn: sqlite3.Connection,
+    run_id: str,
+    iteration_num: int,
+    epoch: int,
+    metrics_json: str,
+) -> None:
+    """Record a per-epoch metric snapshot."""
+    conn.execute(
+        """INSERT INTO epoch_metrics (run_id, iteration_num, epoch, metrics, timestamp)
+           VALUES (?, ?, ?, ?, ?)""",
+        (run_id, iteration_num, epoch, metrics_json, _utcnow_iso()),
+    )
+    conn.commit()
+
+
+def get_epoch_metrics(
+    conn: sqlite3.Connection,
+    run_id: str,
+    iteration_num: int | None = None,
+) -> list[EpochMetric]:
+    """Get epoch metrics for a run, optionally filtered by iteration."""
+    if iteration_num is not None:
+        rows = conn.execute(
+            """SELECT * FROM epoch_metrics WHERE run_id = ? AND iteration_num = ?
+               ORDER BY epoch ASC""",
+            (run_id, iteration_num),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT * FROM epoch_metrics WHERE run_id = ?
+               ORDER BY iteration_num ASC, epoch ASC""",
+            (run_id,),
+        ).fetchall()
+    return [
+        EpochMetric(
+            id=row["id"],
+            run_id=row["run_id"],
+            iteration_num=row["iteration_num"],
+            epoch=row["epoch"],
+            metrics=row["metrics"],
+            timestamp=datetime.fromisoformat(row["timestamp"]),
+        )
+        for row in rows
+    ]
+
+
+# --- GPU Snapshots ---
+
+
+def record_gpu_snapshot(conn: sqlite3.Connection, snapshot: GpuSnapshot) -> None:
+    """Record a GPU metrics snapshot."""
+    conn.execute(
+        """INSERT INTO gpu_snapshots
+           (run_id, gpu_index, utilization_pct, memory_used_mb, memory_total_mb, temperature_c, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            snapshot.run_id,
+            snapshot.gpu_index,
+            snapshot.utilization_pct,
+            snapshot.memory_used_mb,
+            snapshot.memory_total_mb,
+            snapshot.temperature_c,
+            snapshot.timestamp.isoformat(),
+        ),
+    )
+    conn.commit()
+
+
+def get_gpu_snapshots(
+    conn: sqlite3.Connection, run_id: str, limit: int = 500,
+) -> list[GpuSnapshot]:
+    """Get recent GPU snapshots for a run, ordered by timestamp."""
+    rows = conn.execute(
+        """SELECT * FROM (
+               SELECT * FROM gpu_snapshots WHERE run_id = ?
+               ORDER BY timestamp DESC LIMIT ?
+           ) ORDER BY timestamp ASC""",
+        (run_id, limit),
+    ).fetchall()
+    return [_row_to_gpu_snapshot(row) for row in rows]
+
+
+def get_latest_gpu_snapshot(
+    conn: sqlite3.Connection, run_id: str,
+) -> GpuSnapshot | None:
+    """Get the most recent GPU snapshot for a run."""
+    row = conn.execute(
+        "SELECT * FROM gpu_snapshots WHERE run_id = ? ORDER BY timestamp DESC LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return _row_to_gpu_snapshot(row)
+
+
+def _row_to_gpu_snapshot(row: sqlite3.Row) -> GpuSnapshot:
+    return GpuSnapshot(
+        id=row["id"],
+        run_id=row["run_id"],
+        gpu_index=row["gpu_index"],
+        utilization_pct=row["utilization_pct"],
+        memory_used_mb=row["memory_used_mb"],
+        memory_total_mb=row["memory_total_mb"],
+        temperature_c=row["temperature_c"],
+        timestamp=datetime.fromisoformat(row["timestamp"]),
+    )
 
 
 # --- Journal ---

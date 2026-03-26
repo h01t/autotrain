@@ -1,15 +1,14 @@
 # AutoTrain config for vehicle detection (YOLO + KITTI)
-# Cost estimate: ~$0.15 for 50 iterations with Haiku
 
 agent:
-  provider: anthropic
-  model: claude-haiku-4-5-20251001
+  provider: deepseek
+  model: deepseek-reasoner
   temperature: 0.3
   hard_timeout_seconds: 180
 
 metric:
   name: mAP
-  target: 0.80
+  target: 0.90
   direction: maximize
 
 budget:
@@ -23,6 +22,7 @@ execution:
   mode: ssh
   ssh_host: blackbox
   ssh_remote_dir: /home/holt/dev/object-det
+  ssh_setup_command: "~/.local/bin/uv sync"  # Install deps on remote before first run
   gpu_device: "0"
 
 sandbox:

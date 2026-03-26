@@ -13,19 +13,9 @@ log = structlog.get_logger()
 _shutdown_event = threading.Event()
 
 
-def get_shutdown_event() -> threading.Event:
-    """Get the global shutdown event."""
-    return _shutdown_event
-
-
 def is_shutting_down() -> bool:
     """Check if a shutdown signal has been received."""
     return _shutdown_event.is_set()
-
-
-def request_shutdown() -> None:
-    """Request a graceful shutdown."""
-    _shutdown_event.set()
 
 
 def install_signal_handlers() -> None:

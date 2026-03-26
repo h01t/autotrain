@@ -1,7 +1,7 @@
 """SSH executor — run training on a remote GPU via SSH + rsync.
 
-Key resilience pattern: training runs with nohup on the remote, writing to a log file.
-If SSH drops, training continues. We reconnect and resume tailing.
+Key resilience pattern: training runs with setsid on the remote (new process group),
+writing to a log file. If SSH drops, training continues. We reconnect and resume tailing.
 """
 
 from __future__ import annotations
@@ -28,11 +28,13 @@ class SSHExecutor:
         ssh_key: str | None = None,
         ssh_port: int = 22,
         rsync_excludes: list[str] | None = None,
+        setup_command: str | None = None,
     ) -> None:
         self._host = host
         self._remote_dir = remote_dir
         self._ssh_port = ssh_port
         self._rsync_excludes = rsync_excludes or []
+        self._setup_command = setup_command
         self._result: ExecutionResult | None = None
         self._start_time: float = 0
 
@@ -46,8 +48,8 @@ class SSHExecutor:
         if ssh_key:
             self._ssh_opts.extend(["-i", ssh_key])
 
-    def setup(self) -> None:
-        """Verify SSH connectivity and create remote directory."""
+    def setup(self, repo_path: Path | None = None) -> None:
+        """Verify SSH connectivity, create remote directory, and run setup command."""
         try:
             self._ssh_run("echo ok", timeout=15)
         except subprocess.CalledProcessError as e:
@@ -56,6 +58,17 @@ class SSHExecutor:
             ) from e
 
         self._ssh_run(f"mkdir -p {self._remote_dir}/.autotrain", timeout=10)
+
+        # Sync files first so requirements.txt/pyproject.toml are on the remote
+        if repo_path and self._setup_command:
+            self.sync_files(repo_path)
+            log.info("ssh_running_setup_command", command=self._setup_command)
+            self._ssh_run(
+                f"cd {self._remote_dir} && {self._setup_command}",
+                timeout=300,
+            )
+            log.info("ssh_setup_command_complete")
+
         log.info("ssh_setup_complete", host=self._host, remote_dir=self._remote_dir)
 
     def sync_files(self, repo_path: Path, files: list[str] | None = None) -> None:
@@ -105,13 +118,22 @@ class SSHExecutor:
         if env:
             env_prefix = " ".join(f"{k}={v}" for k, v in env.items()) + " "
 
-        # Start training with setsid (new process group) + nohup for full detach
-        start_cmd = (
-            f"cd {self._remote_dir} && "
-            f"setsid bash -c '{env_prefix}{command}' > {remote_log} 2>&1 </dev/null & "
-            f"echo $! > {remote_pid} && disown"
+        # Start training in a fully detached process group.
+        # We write a small launcher script to avoid SSH fd-inheritance hangs:
+        # setsid creates a new process group, nohup prevents SIGHUP,
+        # and the script writes the PID then exits — SSH returns immediately.
+        launcher = f"{self._remote_dir}/.autotrain/_launch.sh"
+        remote_exit = f"{self._remote_dir}/.autotrain/train.exit"
+        script = (
+            f"#!/bin/bash\n"
+            f"cd {self._remote_dir}\n"
+            f"rm -f {remote_exit}\n"
+            f"nohup setsid bash -c '{env_prefix}{command}; echo $? > {remote_exit}' "
+            f"> {remote_log} 2>&1 </dev/null &\n"
+            f"echo $! > {remote_pid}\n"
         )
-        self._ssh_run(start_cmd, timeout=60)
+        self._ssh_run(f"cat > {launcher} << 'LAUNCH_EOF'\n{script}LAUNCH_EOF", timeout=10)
+        self._ssh_run(f"chmod +x {launcher} && bash {launcher}", timeout=15)
         log.info("ssh_training_started", command=command)
 
         # Tail the remote log
@@ -129,8 +151,13 @@ class SSHExecutor:
 
         while time.monotonic() < deadline:
             try:
-                # tail from where we left off
-                skip_cmd = f"tail -n +{lines_seen + 1} -f {remote_log}"
+                # tail from where we left off, using --pid so tail exits
+                # when the training process dies
+                skip_cmd = (
+                    f"tail -n +{lines_seen + 1} -f "
+                    f"--pid=$(cat {remote_pid} 2>/dev/null || echo 1) "
+                    f"{remote_log}"
+                )
                 proc = subprocess.Popen(
                     ["ssh"] + self._ssh_opts + [self._host, skip_cmd],
                     stdout=subprocess.PIPE,
@@ -164,15 +191,17 @@ class SSHExecutor:
         """Build the execution result from remote state."""
         duration = time.monotonic() - self._start_time
 
-        # Get exit code from remote
+        # Read exit code from file written by launcher script
+        remote_exit = f"{self._remote_dir}/.autotrain/train.exit"
         exit_code = -1
         try:
             result = self._ssh_run(
-                f"wait $(cat {remote_pid} 2>/dev/null) 2>/dev/null; echo $?",
+                f"cat {remote_exit} 2>/dev/null",
                 timeout=10,
                 check=False,
             )
-            exit_code = int(result.stdout.strip()) if result.stdout.strip().isdigit() else -1
+            code_str = result.stdout.strip()
+            exit_code = int(code_str) if code_str.isdigit() else -1
         except Exception:
             pass
 
@@ -222,6 +251,26 @@ class SSHExecutor:
                 duration_seconds=time.monotonic() - self._start_time,
                 was_killed=True,
             )
+
+    def detect_checkpoint(self, patterns: list[str]) -> str | None:
+        """Find the most recent checkpoint file on the remote."""
+        # Build a single ls command for all patterns
+        paths = " ".join(
+            f"{self._remote_dir}/{p}" for p in patterns
+        )
+        try:
+            result = self._ssh_run(
+                f"ls -t {paths} 2>/dev/null | head -1",
+                timeout=10,
+                check=False,
+            )
+            path = result.stdout.strip()
+            if path:
+                log.info("ssh_checkpoint_detected", path=path)
+                return path
+        except Exception:
+            pass
+        return None
 
     def cleanup(self) -> None:
         """Kill remote process if still running."""

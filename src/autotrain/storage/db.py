@@ -9,7 +9,7 @@ import structlog
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS iterations (
     duration_seconds REAL,
     api_cost REAL,
     error_message TEXT,
+    checkpoint_path TEXT,
+    resumed_from_checkpoint INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 
@@ -68,9 +70,62 @@ CREATE TABLE IF NOT EXISTS journal (
     timestamp TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS epoch_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    iteration_num INTEGER NOT NULL,
+    epoch INTEGER NOT NULL,
+    metrics TEXT NOT NULL,
+    timestamp TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS gpu_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    gpu_index INTEGER NOT NULL DEFAULT 0,
+    utilization_pct REAL,
+    memory_used_mb REAL,
+    memory_total_mb REAL,
+    temperature_c REAL,
+    timestamp TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_iterations_run ON iterations(run_id, iteration_num);
 CREATE INDEX IF NOT EXISTS idx_metrics_run ON metric_snapshots(run_id, iteration_num);
 CREATE INDEX IF NOT EXISTS idx_journal_run ON journal(run_id, iteration_num);
+CREATE INDEX IF NOT EXISTS idx_epoch_metrics ON epoch_metrics(run_id, iteration_num, epoch);
+CREATE INDEX IF NOT EXISTS idx_gpu_snapshots_run ON gpu_snapshots(run_id, timestamp);
+"""
+
+MIGRATION_V2 = """
+CREATE TABLE IF NOT EXISTS epoch_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    iteration_num INTEGER NOT NULL,
+    epoch INTEGER NOT NULL,
+    metrics TEXT NOT NULL,
+    timestamp TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_epoch_metrics ON epoch_metrics(run_id, iteration_num, epoch);
+"""
+
+MIGRATION_V3 = """
+ALTER TABLE iterations ADD COLUMN checkpoint_path TEXT;
+ALTER TABLE iterations ADD COLUMN resumed_from_checkpoint INTEGER NOT NULL DEFAULT 0;
+"""
+
+MIGRATION_V4 = """
+CREATE TABLE IF NOT EXISTS gpu_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    gpu_index INTEGER NOT NULL DEFAULT 0,
+    utilization_pct REAL,
+    memory_used_mb REAL,
+    memory_total_mb REAL,
+    temperature_c REAL,
+    timestamp TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gpu_snapshots_run ON gpu_snapshots(run_id, timestamp);
 """
 
 
@@ -102,8 +157,14 @@ def init_db(db_path: Path) -> sqlite3.Connection:
         # Check version for future migrations
         row = conn.execute("SELECT version FROM schema_version").fetchone()
         if row and row["version"] < SCHEMA_VERSION:
-            log.info("migrating_database", from_version=row["version"], to_version=SCHEMA_VERSION)
-            # Future: run migration scripts here
+            current = row["version"]
+            log.info("migrating_database", from_version=current, to_version=SCHEMA_VERSION)
+            if current < 2:
+                conn.executescript(MIGRATION_V2)
+            if current < 3:
+                conn.executescript(MIGRATION_V3)
+            if current < 4:
+                conn.executescript(MIGRATION_V4)
             conn.execute(
                 "UPDATE schema_version SET version = ?", (SCHEMA_VERSION,)
             )

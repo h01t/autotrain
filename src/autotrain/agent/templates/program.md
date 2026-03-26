@@ -12,6 +12,21 @@ Get **{{ metric_name }}** to {{ "≥" if direction == "maximize" else "≤" }} *
 - Each experiment has a time budget of {{ experiment_timeout }} — design changes that train within this time
 - Keep changes focused: one hypothesis per experiment
 
+## CRITICAL: Making Changes
+
+### The `search` field must be an EXACT copy-paste from the current file
+Your `search` text is matched literally against the file. If even one character differs (whitespace, quotes, newlines), the change is rejected. **Copy the exact text from the "Current Files" section below** — do not type it from memory or guess.
+
+### Keep the script runnable
+After your changes, the file must still be valid Python that runs without errors. Common mistakes to avoid:
+- Do NOT add parameters that don't exist in the framework's API
+- Do NOT duplicate keyword arguments in a function call
+- Do NOT remove the JSON output print statement at the end — autotrain needs it to extract metrics
+- Do NOT wrap the training call in try/except — let errors propagate so autotrain can see them
+
+### Make small, targeted changes
+Change 1-3 parameters per iteration, not the entire file. A `replace` action that swaps one line is much safer than a `full_rewrite` that replaces 40 lines.
+
 ## Response Format
 You MUST respond with valid JSON in exactly this format:
 ```json
@@ -22,7 +37,7 @@ You MUST respond with valid JSON in exactly this format:
     {
       "file": "train.py",
       "action": "replace",
-      "search": "exact text to find in the file",
+      "search": "exact text copied from Current Files section",
       "replace": "replacement text"
     }
   ],
@@ -31,21 +46,40 @@ You MUST respond with valid JSON in exactly this format:
 ```
 
 ### Change actions:
-- `replace`: Find `search` text in file and replace with `replace` text. Search must be an exact match.
-- `full_rewrite`: Replace entire file content with `content` field.
+- `replace`: Find `search` text in file and replace with `replace` text. The search text must be an EXACT substring of the current file — copy it character-for-character.
+- `full_rewrite`: Replace entire file content with `content` field. Use sparingly — only when the file structure needs fundamental changes.
 
 ## Strategy Playbook
+
+**What to tune (in order of impact):**
+1. Learning rate (`lr0`) — most impactful single parameter
+2. Batch size (`batch`) — affects gradient noise and training speed
+3. Epochs — more training time if metrics are still improving
+4. Optimizer — try "SGD", "Adam", "AdamW", "auto"
+5. Augmentation — `mosaic`, `mixup`, `degrees`, `translate`, `scale`, `fliplr`, `hsv_h/s/v`
+6. Model size — use a larger pretrained model (e.g., yolo11s.pt, yolo11m.pt)
+7. Image size (`imgsz`) — 640 is standard, 800/1024 can help with small objects
+8. Scheduler — `cos_lr=True`, `lrf` (final LR factor), `warmup_epochs`
+
+**What NOT to do:**
+- Don't add parameters you're unsure about — if the framework doesn't support it, training crashes
+- Don't change more than 3 things at once — you won't know what helped
+- Don't repeat a change that already failed in the history
+
 | Situation | What to try |
 |-----------|------------|
-| Loss plateauing | Reduce LR, change scheduler, add warmup |
-| Overfitting (train >> val) | Add dropout, reduce model size, more augmentation |
-| Underfitting (both metrics low) | Increase capacity, longer training, higher LR |
-| Metric oscillating | Reduce LR, increase batch size, add EMA |
-| NaN/Inf loss | Reduce LR by 10x, add gradient clipping |
-| No progress after 5+ iterations | Try fundamentally different approach |
+| First iteration (no history) | Run baseline as-is, or make one small LR adjustment |
+| Loss plateauing | Reduce LR, add cosine schedule, increase epochs |
+| Overfitting (train >> val) | Add dropout, more augmentation, reduce model size |
+| Underfitting (both low) | Increase model size, higher LR, longer training |
+| Metric oscillating | Reduce LR, increase batch size |
+| NaN/Inf loss | Reduce LR by 10x, disable amp |
+| Training crashed | Read the error, fix the specific issue, don't add new changes |
+| No progress after 5+ iters | Try a larger model or fundamentally different augmentation |
 
 ## Important
 - NEVER stop or ask for confirmation. Always propose a change.
-- If you're stuck, try something radically different.
-- Prefer elegant, minimal changes over large rewrites.
-- Learn from the experiment history — don't repeat failed approaches.
+- If the last iteration crashed, focus ONLY on fixing the crash — don't add new experimental changes.
+- Prefer minimal changes. Changing one parameter is better than rewriting the file.
+- Learn from experiment history — don't repeat failed approaches.
+- The `search` text MUST be copied exactly from Current Files. This is the #1 cause of rejected changes.

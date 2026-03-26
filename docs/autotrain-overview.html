@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: A4; margin: 2.5cm; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 11pt;
+    line-height: 1.6;
+    color: #1a1a1a;
+    max-width: 750px;
+    margin: 0 auto;
+    padding: 20px;
+}
+h1 {
+    font-size: 22pt;
+    border-bottom: 2px solid #333;
+    padding-bottom: 8px;
+    margin-top: 0;
+}
+h2 {
+    font-size: 16pt;
+    color: #2c3e50;
+    margin-top: 28px;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 4px;
+}
+h3 { font-size: 13pt; color: #34495e; margin-top: 20px; }
+hr { border: none; border-top: 2px solid #333; margin: 24px 0; }
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 16px 0;
+    font-size: 10pt;
+}
+th, td {
+    border: 1px solid #ccc;
+    padding: 8px 12px;
+    text-align: left;
+}
+th { background: #f5f5f5; font-weight: 600; }
+tr:nth-child(even) { background: #fafafa; }
+code {
+    background: #f4f4f4;
+    padding: 2px 5px;
+    border-radius: 3px;
+    font-size: 9.5pt;
+    font-family: "SF Mono", Menlo, monospace;
+}
+pre {
+    background: #f8f8f8;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    padding: 12px;
+    overflow-x: auto;
+    font-size: 8.5pt;
+    line-height: 1.4;
+}
+pre code { background: none; padding: 0; }
+strong { color: #1a1a1a; }
+blockquote {
+    border-left: 3px solid #3498db;
+    margin-left: 0;
+    padding-left: 16px;
+    color: #555;
+}
+</style>
+</head>
+<body>
+<h1>AutoTrain: Autonomous ML Training Platform</h1>
+<p><strong>Version 0.1.0 | March 2026</strong></p>
+<hr />
+<h2>The Idea</h2>
+<p>Training machine learning models is an iterative, time-consuming process. A researcher adjusts hyperparameters, runs training, waits for results, analyzes metrics, and repeats. This cycle can take days or weeks of manual work.</p>
+<p>AutoTrain replaces this manual loop with an autonomous agent. Given a training script, a target metric, and a compute budget, AutoTrain uses an LLM to propose code changes, executes training on remote GPU hardware, evaluates results, and iterates — all without human intervention.</p>
+<p>The core insight: an LLM can read a training script, understand experiment history, and propose informed hyperparameter changes just like a researcher would — but it can run 24/7 without fatigue or context-switching.</p>
+<h2>Use Case: Vehicle Detection</h2>
+<p>Our first test case uses YOLO object detection trained on the KITTI autonomous driving dataset. The goal: push mAP (mean Average Precision) from a baseline to &gt;= 0.90.</p>
+<p><strong>Setup:</strong>
+- Model: YOLOv11n (nano) with pretrained weights
+- Dataset: KITTI (vehicles, pedestrians, cyclists)
+- Compute: NVIDIA GPU workstation (SSH remote)
+- Agent: DeepSeek Chat (cost-effective LLM)
+- Budget: 4 hours, 50 iterations, $2.00 API cap</p>
+<p><strong>Results (First Run):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Baseline</th>
+<th>After AutoTrain</th>
+<th>Target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>mAP@0.5</td>
+<td>—</td>
+<td><strong>0.8384</strong></td>
+<td>0.80</td>
+</tr>
+<tr>
+<td>mAP@0.5-0.95</td>
+<td>—</td>
+<td>0.5984</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Precision</td>
+<td>—</td>
+<td>0.8349</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Recall</td>
+<td>—</td>
+<td>0.7599</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>Target hit in <strong>2 iterations</strong>, ~35 minutes total training time. The agent reduced learning rate (0.01 -&gt; 0.008) and batch size (16 -&gt; 8). Total API cost: &lt; $0.01.</p>
+<hr />
+<h2>How It Works</h2>
+<p>When <code>autotrain run</code> is started, the following sequence executes:</p>
+<pre><code>                        YOUR MACHINE                          REMOTE GPU
+                        ────────────                          ──────────
+                    ┌─────────────────┐
+                    │  1. INITIALIZE   │
+                    │  - Git init/branch│
+                    │  - SQLite DB     │
+                    │  - rsync + setup │──── SSH ────► mkdir + uv sync
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │  2. CALL AGENT   │
+                    │  - Build prompt  │
+                    │  - Send to LLM   │◄──── LLM API (DeepSeek/Claude)
+                    │  - Parse response│
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │  3. VALIDATE     │
+                    │  - Sandbox check │  Only whitelisted files
+                    │  - Search/replace│  Exact text matching
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │  4. APPLY + SYNC │
+                    │  - Edit files    │
+                    │  - Git commit    │
+                    │  - rsync to GPU  │──── rsync ──► Updated train.py
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │  5. TRAIN        │
+                    │  - SSH execute   │──── SSH ────► setsid python train.py
+                    │  - Tail logs     │◄─── stdout ── Training output
+                    │  - Extract metric│
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │  6. EVALUATE     │
+                    │  - Compare to    │
+                    │    best metric   │
+                    │  - Target hit?   │──► YES: Stop (completed)
+                    │  - Regressed?    │──► Revert commit
+                    └────────┬────────┘
+                             │
+                             ▼
+                      Loop back to 2
+</code></pre>
+<h3>Key Design Decisions</h3>
+<p><strong>Sandbox Safety.</strong> The agent can only modify files explicitly listed in <code>writable_files</code>. All changes go through search/replace validation — the agent must reference exact text from the current file, preventing hallucinated edits.</p>
+<p><strong>Git-Based Rollback.</strong> Every iteration is a git commit. If a change makes metrics worse, the commit is reverted. The experiment branch preserves the full history of what was tried.</p>
+<p><strong>Process Isolation.</strong> Training runs in a <code>setsid</code> process group on the remote machine. If SSH drops (laptop sleeps, network hiccup), training continues. AutoTrain reconnects and resumes tailing output.</p>
+<p><strong>Multi-Provider LLM.</strong> Supports Anthropic (Claude), DeepSeek, and Ollama. The vehicle detection run used DeepSeek Chat at $0.27/1M input tokens — orders of magnitude cheaper than manual researcher time.</p>
+<p><strong>Budget Enforcement.</strong> Hard limits on wall-clock time, iteration count, and API spend. Training cannot run away.</p>
+<hr />
+<h2>Architecture</h2>
+<pre><code>src/autotrain/           3,876 lines across 42 modules
+├── agent/               LLM client, prompt builder, response parser
+├── config/              YAML config loader, Pydantic schemas
+├── core/                Agent loop, budget tracker, state machine
+├── execution/           Local and SSH executors
+├── experiment/          Git ops, metrics extraction, sandbox
+├── monitor/             Streamlit real-time dashboard
+├── notify/              Terminal + webhook notifications
+├── storage/             SQLite database, queries
+├── util/                Logging, signals
+└── watchdog/            Disk/GPU health monitoring
+</code></pre>
+<p><strong>Dependencies:</strong> 8 runtime packages (anthropic, click, pydantic, pyyaml, structlog, requests, streamlit, plotly). No heavy ML frameworks — AutoTrain orchestrates, it doesn't train.</p>
+<p><strong>Monitoring.</strong> A Streamlit dashboard (<code>autotrain monitor</code>) shows live metric charts, iteration history, agent reasoning logs, and cost tracking — all read from the SQLite database in WAL mode for concurrent access.</p>
+<hr />
+<h2>Configuration</h2>
+<p>A single YAML file controls the entire run:</p>
+<pre><code class="language-yaml">agent:
+  provider: deepseek          # anthropic | deepseek | ollama
+  model: deepseek-chat
+  temperature: 0.3
+
+metric:
+  name: mAP
+  target: 0.90
+  direction: maximize
+
+budget:
+  time_seconds: 14400         # 4 hours
+  max_iterations: 50
+  api_dollars: 2.00
+
+execution:
+  train_command: &quot;.venv/bin/python train.py&quot;
+  mode: ssh
+  ssh_host: blackbox
+  ssh_remote_dir: /home/holt/dev/object-det
+  ssh_setup_command: &quot;~/.local/bin/uv sync&quot;
+  gpu_device: &quot;0&quot;
+
+sandbox:
+  writable_files:
+    - train.py
+</code></pre>
+<p>The <code>ssh_setup_command</code> runs once before the first training iteration — installing dependencies on a fresh remote machine with zero manual SSH work.</p>
+<hr />
+<h2>Future Improvements</h2>
+<p><strong>Multi-file experiments.</strong> Currently the agent modifies a single training script. Supporting model architecture files, data augmentation configs, and custom loss functions would give the agent more leverage.</p>
+<p><strong>Checkpoint-aware recovery.</strong> If a long training run crashes mid-epoch, resume from the last checkpoint instead of restarting. The state machine already has hooks for this.</p>
+<p><strong>Parallel experiments.</strong> Run multiple hypotheses simultaneously across multiple GPUs or machines. Compare results and keep the best.</p>
+<p><strong>Smarter agent context.</strong> Feed training curves (loss over epochs) back to the agent, not just final metrics. This would let it diagnose overfitting, learning rate issues, and convergence problems more precisely.</p>
+<p><strong>Model selection.</strong> Let the agent switch between model architectures (yolo11n -&gt; yolo11s -&gt; yolo11m) based on performance plateaus, not just tune hyperparameters.</p>
+<p><strong>Web dashboard.</strong> Extend the Streamlit monitor into a full web UI with run management, comparison views, and one-click deployment of the best model.</p>
+</body>
+</html>

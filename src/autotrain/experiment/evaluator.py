@@ -25,13 +25,3 @@ def is_improved(
         return new_value > best_value
     else:
         return new_value < best_value
-
-
-def improvement_pct(
-    new_value: float,
-    old_value: float,
-) -> float:
-    """Calculate percentage improvement (positive = better)."""
-    if old_value == 0:
-        return 0.0
-    return ((new_value - old_value) / abs(old_value)) * 100

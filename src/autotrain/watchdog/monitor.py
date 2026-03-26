@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import structlog
 
 from autotrain.config.schema import WatchdogConfig
+from autotrain.storage.models import GpuSnapshot
+from autotrain.storage.queries import record_gpu_snapshot
 from autotrain.util.signals import is_shutting_down
-from autotrain.watchdog.health import check_disk_space, check_gpu_memory
+from autotrain.watchdog.health import check_disk_space
 
 log = structlog.get_logger()
 
@@ -22,11 +26,17 @@ class WatchdogMonitor:
         self,
         config: WatchdogConfig,
         repo_path: Path,
-        on_alert: callable | None = None,
+        on_alert: Callable | None = None,
+        gpu_query_fn: Callable[[], list[dict]] | None = None,
+        db_conn: sqlite3.Connection | None = None,
+        run_id: str | None = None,
     ) -> None:
         self._config = config
         self._repo_path = repo_path
         self._on_alert = on_alert
+        self._gpu_query_fn = gpu_query_fn
+        self._db_conn = db_conn
+        self._run_id = run_id
         self._thread: threading.Thread | None = None
         self._last_stdout_time = time.monotonic()
         self._alerts: list[str] = []
@@ -63,10 +73,8 @@ class WatchdogMonitor:
         if not check_disk_space(self._repo_path, self._config.disk_space_min_gb):
             self._alert("Disk space critically low")
 
-        # GPU memory
-        gpu_ok = check_gpu_memory(self._config.gpu_memory_min_mb)
-        if gpu_ok is False:
-            self._alert("GPU memory critically low")
+        # GPU metrics collection + memory alert
+        self._collect_gpu_metrics()
 
         # Stdout stagnation
         minutes_silent = (
@@ -76,6 +84,41 @@ class WatchdogMonitor:
             self._alert(
                 f"Training silent for {minutes_silent:.0f} minutes"
             )
+
+    def _collect_gpu_metrics(self) -> None:
+        """Collect GPU metrics, store to DB, and check memory thresholds."""
+        if not self._gpu_query_fn:
+            return
+
+        try:
+            gpus = self._gpu_query_fn()
+        except Exception as e:
+            log.debug("gpu_query_failed", error=str(e))
+            return
+
+        for gpu in gpus:
+            # Check memory threshold
+            free_mb = gpu.get("memory_total_mb", 0) - gpu.get("memory_used_mb", 0)
+            if free_mb < self._config.gpu_memory_min_mb:
+                self._alert(
+                    f"GPU {gpu.get('gpu_index', 0)} memory critically low: "
+                    f"{free_mb:.0f}MB free"
+                )
+
+            # Store to DB if available
+            if self._db_conn and self._run_id:
+                try:
+                    snapshot = GpuSnapshot(
+                        run_id=self._run_id,
+                        gpu_index=gpu.get("gpu_index", 0),
+                        utilization_pct=gpu.get("utilization_pct"),
+                        memory_used_mb=gpu.get("memory_used_mb"),
+                        memory_total_mb=gpu.get("memory_total_mb"),
+                        temperature_c=gpu.get("temperature_c"),
+                    )
+                    record_gpu_snapshot(self._db_conn, snapshot)
+                except Exception as e:
+                    log.debug("gpu_snapshot_write_failed", error=str(e))
 
     def _alert(self, message: str) -> None:
         log.warning("watchdog_alert", message=message)

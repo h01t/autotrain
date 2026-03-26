@@ -61,6 +61,8 @@ class Iteration:
     duration_seconds: float | None = None
     api_cost: float | None = None
     error_message: str | None = None
+    checkpoint_path: str | None = None
+    resumed_from_checkpoint: bool = False
     created_at: datetime = field(default_factory=_utcnow)
 
 
@@ -71,6 +73,28 @@ class MetricSnapshot:
     iteration_num: int = 0
     metric_name: str = ""
     value: float = 0.0
+    timestamp: datetime = field(default_factory=_utcnow)
+
+
+@dataclass
+class EpochMetric:
+    id: int | None = None
+    run_id: str = ""
+    iteration_num: int = 0
+    epoch: int = 0
+    metrics: str = ""  # JSON: {"loss": 0.15, "mAP": 0.72, ...}
+    timestamp: datetime = field(default_factory=_utcnow)
+
+
+@dataclass
+class GpuSnapshot:
+    id: int | None = None
+    run_id: str = ""
+    gpu_index: int = 0
+    utilization_pct: float | None = None
+    memory_used_mb: float | None = None
+    memory_total_mb: float | None = None
+    temperature_c: float | None = None
     timestamp: datetime = field(default_factory=_utcnow)
 
 

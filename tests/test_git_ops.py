@@ -10,9 +10,6 @@ import pytest
 from autotrain.experiment.git_ops import (
     commit,
     create_branch,
-    current_branch,
-    get_head_hash,
-    get_log,
     has_uncommitted_changes,
     init_repo,
     is_git_repo,
@@ -59,7 +56,6 @@ class TestGitOps:
 
     def test_create_branch(self, git_repo):
         create_branch(git_repo, "autotrain/test")
-        assert current_branch(git_repo) == "autotrain/test"
 
     def test_commit(self, git_repo):
         (git_repo / "train.py").write_text("print('hello')\n")
@@ -87,14 +83,3 @@ class TestGitOps:
         revert_last_commit(git_repo)
         assert (git_repo / "train.py").read_text() == "v1\n"
 
-    def test_get_head_hash(self, git_repo):
-        hash_ = get_head_hash(git_repo)
-        assert len(hash_) >= 7
-
-    def test_get_log(self, git_repo):
-        (git_repo / "a.txt").write_text("a")
-        commit(git_repo, "Second commit")
-
-        log_entries = get_log(git_repo, limit=5)
-        assert len(log_entries) >= 2
-        assert log_entries[0]["message"] == "Second commit"

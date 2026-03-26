@@ -52,12 +52,6 @@ def create_branch(repo_path: Path, branch_name: str) -> None:
     log.info("git_branch_created", branch=branch_name)
 
 
-def current_branch(repo_path: Path) -> str:
-    """Get the current branch name."""
-    result = _run_git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
-    return result.stdout.strip()
-
-
 def commit(repo_path: Path, message: str, files: list[str] | None = None) -> str | None:
     """Stage files and commit. Returns the commit hash, or None if nothing to commit.
 
@@ -93,59 +87,9 @@ def revert_last_commit(repo_path: Path) -> None:
     log.info("git_reverted_last_commit")
 
 
-def reset_to_commit(repo_path: Path, commit_hash: str) -> None:
-    """Hard reset to a specific commit. Use with caution."""
-    _run_git(repo_path, "reset", "--hard", commit_hash)
-    log.warning("git_hard_reset", target=commit_hash)
-
-
-def get_head_hash(repo_path: Path) -> str:
-    """Get the current HEAD commit hash (short)."""
-    result = _run_git(repo_path, "rev-parse", "--short", "HEAD")
-    return result.stdout.strip()
-
-
 def has_uncommitted_changes(repo_path: Path) -> bool:
     """Check if there are uncommitted changes."""
     result = _run_git(repo_path, "status", "--porcelain")
     return bool(result.stdout.strip())
 
 
-def get_file_content_at_commit(
-    repo_path: Path, commit_hash: str, file_path: str,
-) -> str | None:
-    """Get file content at a specific commit. Returns None if file doesn't exist."""
-    result = _run_git(
-        repo_path, "show", f"{commit_hash}:{file_path}", check=False,
-    )
-    if result.returncode != 0:
-        return None
-    return result.stdout
-
-
-def get_log(repo_path: Path, limit: int = 20) -> list[dict[str, str]]:
-    """Get recent git log entries as dicts."""
-    fmt = "%H%n%h%n%s%n%ai%n---"
-    result = _run_git(repo_path, "log", f"--format={fmt}", f"-{limit}")
-
-    entries = []
-    lines = result.stdout.strip().split("\n---\n")
-    for block in lines:
-        block = block.strip()
-        if not block:
-            continue
-        parts = block.split("\n", 3)
-        if len(parts) >= 4:
-            entries.append({
-                "hash": parts[0],
-                "short_hash": parts[1],
-                "message": parts[2],
-                "date": parts[3],
-            })
-    return entries
-
-
-def get_diff(repo_path: Path, ref1: str, ref2: str) -> str:
-    """Get the diff between two refs."""
-    result = _run_git(repo_path, "diff", ref1, ref2)
-    return result.stdout

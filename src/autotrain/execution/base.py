@@ -57,6 +57,10 @@ class Executor(Protocol):
         """Kill the running training process."""
         ...
 
+    def detect_checkpoint(self, patterns: list[str]) -> str | None:
+        """Find the most recent checkpoint file matching the given glob patterns."""
+        ...
+
     def cleanup(self) -> None:
         """Clean up resources."""
         ...

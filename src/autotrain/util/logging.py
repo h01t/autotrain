@@ -43,8 +43,3 @@ def configure_logging(log_file: Path | None = None, verbose: bool = False) -> No
         wrapper_class=structlog.make_filtering_bound_logger(0),
         cache_logger_on_first_use=True,
     )
-
-
-def get_logger(**initial_values) -> structlog.stdlib.BoundLogger:
-    """Get a structlog logger with optional initial bound values."""
-    return structlog.get_logger(**initial_values)

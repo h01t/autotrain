@@ -9,6 +9,68 @@ import structlog
 
 log = structlog.get_logger()
 
+# Patterns for detecting epoch-level output lines
+_YOLO_EPOCH_RE = re.compile(
+    r"^\s*(\d+)/(\d+)\s+"  # epoch/total (e.g. "3/50")
+    r"[\d.]+G?\s+"          # GPU mem
+    r"([\d.]+)\s+"          # box_loss
+    r"([\d.]+)\s+"          # cls_loss
+    r"([\d.]+)"             # dfl_loss
+)
+
+_YOLO_VAL_RE = re.compile(
+    r"^\s*all\s+\d+\s+\d+\s+"   # "all  N  M"
+    r"([\d.]+)\s+"               # precision
+    r"([\d.]+)\s+"               # recall
+    r"([\d.]+)\s+"               # mAP50
+    r"([\d.]+)"                  # mAP50-95
+)
+
+# Keras-style: "Epoch 3/50 - loss: 0.15 - val_acc: 0.92"
+_KERAS_EPOCH_RE = re.compile(
+    r"Epoch\s+(\d+)/(\d+)"
+)
+
+
+def parse_epoch_line(line: str) -> tuple[int | None, dict[str, float]]:
+    """Try to extract epoch number and metrics from a training output line.
+
+    Returns (epoch_number, metrics_dict). If not an epoch line, returns (None, {}).
+    """
+    line = line.strip()
+    if not line:
+        return None, {}
+
+    # YOLO training line: "3/50  3.18G  1.123  2.345  1.567  45  640"
+    m = _YOLO_EPOCH_RE.match(line)
+    if m:
+        epoch = int(m.group(1))
+        return epoch, {
+            "box_loss": float(m.group(3)),
+            "cls_loss": float(m.group(4)),
+            "dfl_loss": float(m.group(5)),
+        }
+
+    # YOLO validation line: "all  N  M  0.835  0.760  0.838  0.598"
+    m = _YOLO_VAL_RE.match(line)
+    if m:
+        return None, {
+            "precision": float(m.group(1)),
+            "recall": float(m.group(2)),
+            "mAP": float(m.group(3)),
+            "mAP50_95": float(m.group(4)),
+        }
+
+    # Keras-style: "Epoch 3/50 - loss: 0.15 - val_acc: 0.92"
+    m = _KERAS_EPOCH_RE.search(line)
+    if m:
+        epoch = int(m.group(1))
+        metrics = _try_common_patterns(line)
+        if metrics:
+            return epoch, metrics
+
+    return None, {}
+
 
 def extract_metrics_from_line(
     line: str,
@@ -58,23 +120,6 @@ def extract_metric_from_output(
         if metric_name in metrics:
             last_value = metrics[metric_name]
     return last_value
-
-
-def extract_all_metrics_from_output(
-    output: str,
-    regex_pattern: str | None = None,
-    target_metric: str | None = None,
-) -> list[dict[str, float]]:
-    """Extract all metric snapshots from training output.
-
-    Returns a list of metric dicts, one per line that contained metrics.
-    """
-    snapshots = []
-    for line in output.splitlines():
-        metrics = extract_metrics_from_line(line, target_metric, regex_pattern)
-        if metrics:
-            snapshots.append(metrics)
-    return snapshots
 
 
 def _try_json(line: str) -> dict[str, float]:

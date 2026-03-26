@@ -25,7 +25,7 @@ class LocalExecutor:
         self._result: ExecutionResult | None = None
         self._start_time: float = 0
 
-    def setup(self) -> None:
+    def setup(self, repo_path: Path | None = None) -> None:
         """Validate working directory exists."""
         if self._working_dir and not self._working_dir.exists():
             raise FileNotFoundError(f"Working directory not found: {self._working_dir}")
@@ -123,6 +123,21 @@ class LocalExecutor:
                 duration_seconds=time.monotonic() - self._start_time if self._start_time else 0,
                 was_killed=True,
             )
+
+    def detect_checkpoint(self, patterns: list[str]) -> str | None:
+        """Find the most recent checkpoint file locally."""
+        import glob as _glob
+
+        base = self._working_dir or Path(".")
+        candidates: list[Path] = []
+        for pattern in patterns:
+            candidates.extend(base.glob(pattern))
+        if not candidates:
+            return None
+        # Return most recently modified
+        newest = max(candidates, key=lambda p: p.stat().st_mtime)
+        log.info("local_checkpoint_detected", path=str(newest))
+        return str(newest)
 
     def cleanup(self) -> None:
         """Ensure process is terminated."""

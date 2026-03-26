@@ -23,7 +23,7 @@ from autotrain.experiment.git_ops import (
     init_repo,
     revert_last_commit,
 )
-from autotrain.experiment.metrics import extract_metric_from_output
+from autotrain.experiment.metrics import extract_metric_from_output, parse_epoch_line
 from autotrain.experiment.sandbox import (
     FileChange,
     format_rejection_message,
@@ -39,9 +39,11 @@ from autotrain.storage.models import (
     RunStatus,
 )
 from autotrain.storage.queries import (
+    add_run_api_cost,
     create_iteration,
     create_run,
     increment_run_iterations,
+    record_epoch_metric,
     record_metric,
     update_iteration,
     update_run_best,
@@ -83,7 +85,11 @@ class AgentLoop:
         )
         self._executor = self._create_executor()
         self._watchdog = WatchdogMonitor(
-            config.watchdog, self._repo, on_alert=self._on_watchdog_alert,
+            config.watchdog, self._repo,
+            on_alert=self._on_watchdog_alert,
+            gpu_query_fn=self._build_gpu_query_fn(),
+            db_conn=self._conn,
+            run_id=self._run_id,
         )
 
         # State
@@ -91,6 +97,7 @@ class AgentLoop:
         self._template = load_template()
         self._system_prompt = build_system_prompt(config, self._template)
         self._consecutive_crashes = 0
+        self._resume_checkpoint: str | None = None  # Set after crash if checkpoint found
 
     def run(self) -> RunStatus:
         """Execute the full agent loop. Returns final status."""
@@ -103,6 +110,7 @@ class AgentLoop:
             while not is_shutting_down() and not self._sm.is_terminal:
                 try:
                     self._budget.check()
+                    self._run_iteration()
                 except BudgetExhausted as e:
                     log.info("budget_exhausted", reason=str(e))
                     self._sm.transition(AgentState.BUDGET_EXHAUSTED)
@@ -111,8 +119,6 @@ class AgentLoop:
                         **self._budget.summary(),
                     )
                     break
-
-                self._run_iteration()
 
             final_status = self._resolve_final_status()
             update_run_status(self._conn, self._run_id, final_status)
@@ -148,21 +154,26 @@ class AgentLoop:
 
         self._sm = StateMachine(self._conn, self._run_id)
         self._sm.transition(AgentState.READING_STATE)
-        self._executor.setup()
+        self._executor.setup(repo_path=self._repo)
 
     def _run_iteration(self) -> None:
         """Execute one complete iteration of the agent loop."""
         iteration_num = self._sm.advance_iteration()
         increment_run_iterations(self._conn, self._run_id)
 
+        was_resumed = self._resume_checkpoint is not None
         iteration = Iteration(
             run_id=self._run_id,
             iteration_num=iteration_num,
             state=self._sm.state.value,
+            resumed_from_checkpoint=was_resumed,
         )
         iteration_id = create_iteration(self._conn, iteration)
 
-        log.info("iteration_start", iteration=iteration_num)
+        log.info(
+            "iteration_start", iteration=iteration_num,
+            resuming=was_resumed,
+        )
 
         try:
             # 1. Call agent
@@ -191,7 +202,7 @@ class AgentLoop:
 
             # 3. Execute training
             self._sm.transition(AgentState.EXECUTING)
-            output = self._run_training()
+            output = self._run_training(iteration_num)
 
             # 4. Extract metrics
             self._sm.transition(AgentState.EXTRACTING)
@@ -217,6 +228,11 @@ class AgentLoop:
                     value=metric_value,
                 ))
 
+            # Detect checkpoint created by this training run
+            checkpoint = self._executor.detect_checkpoint(
+                self._config.execution.checkpoint_patterns,
+            )
+
             # Update iteration
             update_iteration(
                 self._conn, iteration_id,
@@ -226,6 +242,7 @@ class AgentLoop:
                 agent_reasoning=decision.reasoning,
                 agent_hypothesis=decision.hypothesis,
                 changes_summary=decision.hypothesis[:200],
+                checkpoint_path=checkpoint,
             )
 
             self._consecutive_crashes = 0
@@ -250,13 +267,26 @@ class AgentLoop:
                 outcome=outcome.value if outcome else "unknown",
             )
 
+        except BudgetExhausted:
+            raise  # Let the main loop handle budget exhaustion
+
         except Exception as e:
             log.error("iteration_error", iteration=iteration_num, error=str(e))
             self._consecutive_crashes += 1
+
+            # Check for checkpoint before reverting — we may be able to resume
+            checkpoint = self._executor.detect_checkpoint(
+                self._config.execution.checkpoint_patterns,
+            )
+            if checkpoint:
+                self._resume_checkpoint = checkpoint
+                log.info("checkpoint_found_after_crash", path=checkpoint)
+
             update_iteration(
                 self._conn, iteration_id,
                 outcome=IterationOutcome.CRASHED,
                 error_message=str(e),
+                checkpoint_path=checkpoint,
             )
 
             # Revert uncommitted changes
@@ -305,6 +335,7 @@ class AgentLoop:
 
             response = self._agent.call(self._system_prompt, user_msg)
             self._budget.record_api_cost(response.cost_estimate)
+            add_run_api_cost(self._conn, self._run_id, response.cost_estimate)
 
             try:
                 decision = parse_response(response.raw_text)
@@ -338,19 +369,71 @@ class AgentLoop:
                     content = content.replace(change.search, change.replace or "", 1)
                     filepath.write_text(content)
 
-    def _run_training(self) -> str:
-        """Execute training and collect output."""
+    def _run_training(self, iteration_num: int) -> str:
+        """Execute training and collect output, capturing per-epoch metrics."""
         self._executor.sync_files(self._repo)
         output_lines = []
+        current_epoch = 0
+        pending_val_metrics: dict[str, float] = {}
+
+        env = {"CUDA_VISIBLE_DEVICES": self._config.execution.gpu_device or "0"}
+        if self._resume_checkpoint:
+            env["AUTOTRAIN_RESUME_FROM"] = self._resume_checkpoint
+            log.info("resuming_from_checkpoint", path=self._resume_checkpoint)
+            self._resume_checkpoint = None  # Consume it
+
         for line in self._executor.execute(
             self._config.execution.train_command,
             timeout_seconds=self._config.budget.experiment_timeout_seconds,
-            env={"CUDA_VISIBLE_DEVICES": self._config.execution.gpu_device or "0"},
+            env=env,
         ):
             output_lines.append(line)
             self._watchdog.report_stdout_activity()
 
+            # Check time budget mid-training — don't let a single run exceed total budget
+            if (
+                self._config.budget.time_seconds
+                and self._budget.elapsed_seconds >= self._config.budget.time_seconds
+            ):
+                log.warning("time_budget_exceeded_mid_training", elapsed=f"{self._budget.elapsed_seconds:.0f}s")
+                self._executor.kill()
+                raise BudgetExhausted(
+                    f"Time budget exhausted during training: {self._budget.elapsed_seconds:.0f}s "
+                    f">= {self._config.budget.time_seconds}s"
+                )
+
+            # Try to extract per-epoch metrics
+            epoch, metrics = parse_epoch_line(line)
+            if epoch is not None:
+                # Training line — update current epoch, merge any pending val metrics
+                if pending_val_metrics and current_epoch > 0:
+                    self._store_epoch_metrics(
+                        iteration_num, current_epoch, pending_val_metrics,
+                    )
+                    pending_val_metrics = {}
+                current_epoch = epoch
+                pending_val_metrics.update(metrics)
+            elif metrics and current_epoch > 0:
+                # Validation line (no epoch num) — attach to current epoch
+                pending_val_metrics.update(metrics)
+
+        # Flush last epoch's metrics
+        if pending_val_metrics and current_epoch > 0:
+            self._store_epoch_metrics(
+                iteration_num, current_epoch, pending_val_metrics,
+            )
+
         return "\n".join(output_lines)
+
+    def _store_epoch_metrics(
+        self, iteration_num: int, epoch: int, metrics: dict[str, float],
+    ) -> None:
+        """Persist per-epoch metrics to the database."""
+        import json
+        record_epoch_metric(
+            self._conn, self._run_id, iteration_num, epoch,
+            json.dumps(metrics),
+        )
 
     def _evaluate(
         self, metric_value: float | None, iteration_num: int, iteration_id: int,
@@ -393,6 +476,7 @@ class AgentLoop:
                 ssh_key=cfg.ssh_key,
                 ssh_port=cfg.ssh_port,
                 rsync_excludes=cfg.rsync_excludes,
+                setup_command=cfg.ssh_setup_command,
             )
         return LocalExecutor(working_dir=self._repo)
 

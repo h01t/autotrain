@@ -57,11 +57,6 @@ class TestMetricConfig:
         )
         assert m.extraction_pattern is not None
 
-    def test_file_requires_path(self):
-        with pytest.raises(ValueError, match="extraction_file required"):
-            MetricConfig(name="val_auc", target=0.85, extraction_mode="file")
-
-
 class TestBudgetConfig:
     def test_time_string_parsed(self):
         b = BudgetConfig(time_seconds="4h")
