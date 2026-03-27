@@ -14,25 +14,25 @@ The core insight: an LLM can read a training script, understand experiment histo
 
 ## Use Case: Vehicle Detection
 
-Our first test case uses YOLO object detection trained on the KITTI autonomous driving dataset. The goal: push mAP (mean Average Precision) from a baseline to >= 0.90.
+Our primary test case uses YOLO object detection trained on the KITTI autonomous driving dataset. The goal: push mAP (mean Average Precision) from a baseline to >= 0.90.
 
 **Setup:**
-- Model: YOLOv11n (nano) with pretrained weights
-- Dataset: KITTI (vehicles, pedestrians, cyclists)
-- Compute: NVIDIA GPU workstation (SSH remote)
-- Agent: DeepSeek Chat (cost-effective LLM)
+- Model: YOLO (v8/v11) with pretrained weights
+- Dataset: KITTI (vehicles, pedestrians, cyclists — 5,985 train / 1,496 val images)
+- Compute: NVIDIA RTX 3060 Ti (8GB VRAM) via SSH
+- Agent: DeepSeek Reasoner (cost-effective reasoning LLM)
 - Budget: 4 hours, 50 iterations, $2.00 API cap
 
 **Results (First Run):**
 
-| Metric | Baseline | After AutoTrain | Target |
-|--------|----------|-----------------|--------|
-| mAP@0.5 | — | **0.8384** | 0.80 |
-| mAP@0.5-0.95 | — | 0.5984 | — |
-| Precision | — | 0.8349 | — |
-| Recall | — | 0.7599 | — |
+| Metric | After AutoTrain | Target |
+|--------|-----------------|--------|
+| mAP@0.5 | **0.8384** | 0.90 |
+| mAP@0.5-0.95 | 0.5984 | — |
+| Precision | 0.8349 | — |
+| Recall | 0.7599 | — |
 
-Target hit in **2 iterations**, ~35 minutes total training time. The agent reduced learning rate (0.01 -> 0.008) and batch size (16 -> 8). Total API cost: < $0.01.
+Achieved 0.84 mAP in 2 iterations, ~35 minutes total training time. The agent reduced learning rate (0.01 -> 0.008) and batch size (16 -> 8). Total API cost: < $0.01.
 
 ---
 
@@ -53,7 +53,8 @@ When `autotrain run` is started, the following sequence executes:
                     ┌────────▼────────┐
                     │  2. CALL AGENT   │
                     │  - Build prompt  │
-                    │  - Send to LLM   │◄──── LLM API (DeepSeek/Claude)
+                    │  - History +     │
+                    │    training curve│◄──── LLM API (DeepSeek/Claude)
                     │  - Parse response│
                     └────────┬────────┘
                              │
@@ -70,11 +71,12 @@ When `autotrain run` is started, the following sequence executes:
                     │  - rsync to GPU  │──── rsync ──► Updated train.py
                     └────────┬────────┘
                              │
-                    ┌────────▼────────┐
-                    │  5. TRAIN        │
-                    │  - SSH execute   │──── SSH ────► setsid python train.py
-                    │  - Tail logs     │◄─── stdout ── Training output
-                    │  - Extract metric│
+                    ┌────────▼────────┐        ┌──────────────────┐
+                    │  5. TRAIN        │        │  GPU MONITOR     │
+                    │  - SSH execute   │── SSH ─► setsid python    │
+                    │  - Stream epochs │◄ stdout │  train.py       │
+                    │  - Budget check  │        │  nvidia-smi poll │
+                    │  - Extract metric│        └──────────────────┘
                     └────────┬────────┘
                              │
                     ┌────────▼────────┐
@@ -83,6 +85,7 @@ When `autotrain run` is started, the following sequence executes:
                     │    best metric   │
                     │  - Target hit?   │──► YES: Stop (completed)
                     │  - Regressed?    │──► Revert commit
+                    │  - Crashed?      │──► Checkpoint resume
                     └────────┬────────┘
                              │
                              ▼
@@ -97,31 +100,62 @@ When `autotrain run` is started, the following sequence executes:
 
 **Process Isolation.** Training runs in a `setsid` process group on the remote machine. If SSH drops (laptop sleeps, network hiccup), training continues. AutoTrain reconnects and resumes tailing output.
 
-**Multi-Provider LLM.** Supports Anthropic (Claude), DeepSeek, and Ollama. The vehicle detection run used DeepSeek Chat at $0.27/1M input tokens — orders of magnitude cheaper than manual researcher time.
+**Multi-Provider LLM.** Supports Anthropic (Claude), DeepSeek (including deepseek-reasoner), and Ollama. DeepSeek Reasoner provides strong reasoning capabilities at ~$0.002/iteration.
 
-**Budget Enforcement.** Hard limits on wall-clock time, iteration count, and API spend. Training cannot run away.
+**Budget Enforcement.** Hard limits on wall-clock time, iteration count, and API spend. Budget is checked both between iterations and mid-training — a single run cannot exceed the total time budget.
+
+**Training Curves as Agent Context.** The agent doesn't just see final metrics — it receives per-epoch training curves with trend summaries, enabling it to diagnose overfitting, learning rate issues, and convergence problems.
+
+**Checkpoint Recovery.** When training crashes, AutoTrain detects checkpoint files (e.g. `last.pt`, `best.pt`) on the remote and injects `AUTOTRAIN_RESUME_FROM` into the next training run's environment. The user's training script can optionally resume from the checkpoint instead of restarting from scratch.
+
+**GPU Monitoring.** A background watchdog queries `nvidia-smi` on the remote GPU (via SSH) at regular intervals, storing utilization, memory, and temperature snapshots. The dashboard displays these in real time, eliminating the need for a separate `watch nvidia-smi` terminal.
 
 ---
 
 ## Architecture
 
 ```
-src/autotrain/           3,876 lines across 42 modules
+src/autotrain/           4,936 lines across 43 modules
 ├── agent/               LLM client, prompt builder, response parser
-├── config/              YAML config loader, Pydantic schemas
+├── config/              YAML config loader, Pydantic schemas, defaults
 ├── core/                Agent loop, budget tracker, state machine
-├── execution/           Local and SSH executors
-├── experiment/          Git ops, metrics extraction, sandbox
+├── execution/           Local and SSH executors, checkpoint detection
+├── experiment/          Git ops, metrics extraction, epoch parsing, sandbox
 ├── monitor/             Streamlit real-time dashboard
 ├── notify/              Terminal + webhook notifications
-├── storage/             SQLite database, queries
+├── storage/             SQLite database (WAL mode), models, queries
 ├── util/                Logging, signals
-└── watchdog/            Disk/GPU health monitoring
+└── watchdog/            GPU metrics collection, disk/health monitoring
 ```
 
 **Dependencies:** 8 runtime packages (anthropic, click, pydantic, pyyaml, structlog, requests, streamlit, plotly). No heavy ML frameworks — AutoTrain orchestrates, it doesn't train.
 
-**Monitoring.** A Streamlit dashboard (`autotrain monitor`) shows live metric charts, iteration history, agent reasoning logs, and cost tracking — all read from the SQLite database in WAL mode for concurrent access.
+### Storage Schema (v4)
+
+SQLite with WAL mode for concurrent access between the training process and the monitoring dashboard. Five tables with incremental migrations:
+
+| Table | Purpose |
+|-------|---------|
+| `runs` | Top-level run records (status, best metric, budget, git branch) |
+| `iterations` | Per-iteration data (outcome, metric, hypothesis, commit, checkpoint) |
+| `metric_snapshots` | Time-series metric values per iteration |
+| `epoch_metrics` | Per-epoch training metrics (JSON blobs — loss, mAP, precision, recall) |
+| `gpu_snapshots` | GPU utilization, memory, temperature time-series |
+
+### Monitoring Dashboard
+
+A Streamlit dashboard (`autotrain monitor`) provides:
+
+- **Metric progress chart** — color-coded by outcome with target/best lines
+- **Training curves** — per-epoch loss and score metrics with multi-iteration overlay
+- **GPU resources** — live utilization, memory %, temperature with history chart
+- **Iteration history** — table with outcome, metric, hypothesis, duration, checkpoint flags
+- **Iteration comparison** — side-by-side diff of any two iterations
+- **Agent reasoning** — expandable log with color-coded outcomes, hypothesis, and changes
+- **Cost & budget tracker** — progress bars with per-iteration rate estimates
+- **Multi-run support** — sidebar run selector with summary stats
+
+All data is read from the SQLite database — the dashboard is a pure read-only viewer.
 
 ---
 
@@ -132,8 +166,9 @@ A single YAML file controls the entire run:
 ```yaml
 agent:
   provider: deepseek          # anthropic | deepseek | ollama
-  model: deepseek-chat
+  model: deepseek-reasoner    # deepseek-chat, claude-sonnet-4, etc.
   temperature: 0.3
+  hard_timeout_seconds: 180
 
 metric:
   name: mAP
@@ -144,6 +179,7 @@ budget:
   time_seconds: 14400         # 4 hours
   max_iterations: 50
   api_dollars: 2.00
+  experiment_timeout_seconds: 900  # 15 min per training run
 
 execution:
   train_command: ".venv/bin/python train.py"
@@ -156,6 +192,9 @@ execution:
 sandbox:
   writable_files:
     - train.py
+
+notify:
+  terminal: true
 ```
 
 The `ssh_setup_command` runs once before the first training iteration — installing dependencies on a fresh remote machine with zero manual SSH work.
@@ -164,14 +203,18 @@ The `ssh_setup_command` runs once before the first training iteration — instal
 
 ## Future Improvements
 
-**Multi-file experiments.** Currently the agent modifies a single training script. Supporting model architecture files, data augmentation configs, and custom loss functions would give the agent more leverage.
+**SSH resilience.** When the SSH tail connection drops during a long training run, reconnect and capture the final output instead of marking the iteration as crashed. Store partial training output to avoid losing completed results.
 
-**Checkpoint-aware recovery.** If a long training run crashes mid-epoch, resume from the last checkpoint instead of restarting. The state machine already has hooks for this.
+**Multi-file experiments.** Allow the agent to modify multiple files per iteration — model architecture, data augmentation configs, custom loss functions — giving it more leverage beyond hyperparameter tuning.
 
-**Parallel experiments.** Run multiple hypotheses simultaneously across multiple GPUs or machines. Compare results and keep the best.
+**Parallel experiments.** Run multiple hypotheses simultaneously across different GPUs or machines. Compare results and keep the best.
 
-**Smarter agent context.** Feed training curves (loss over epochs) back to the agent, not just final metrics. This would let it diagnose overfitting, learning rate issues, and convergence problems more precisely.
+**Model selection agent.** Let the agent switch between model architectures (yolov8n -> yolo11s -> yolo11m) based on performance plateaus, not just tune hyperparameters.
 
-**Model selection.** Let the agent switch between model architectures (yolo11n -> yolo11s -> yolo11m) based on performance plateaus, not just tune hyperparameters.
+**Smart early stopping.** The agent can request early termination of a training run based on streaming epoch metrics — if loss has plateaued or is diverging, kill the run early and iterate faster.
 
-**Web dashboard.** Extend the Streamlit monitor into a full web UI with run management, comparison views, and one-click deployment of the best model.
+**Cross-run learning.** Feed insights from previous runs into new run prompts. Build a knowledge base of what worked and what didn't across experiments.
+
+**Web dashboard.** React/FastAPI replacement for Streamlit with real-time WebSocket updates, experiment management, and one-click deployment of the best model.
+
+**Distributed training.** Multi-GPU and multi-node support for larger models and datasets.
