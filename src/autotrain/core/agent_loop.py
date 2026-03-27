@@ -50,6 +50,7 @@ from autotrain.storage.queries import (
     update_run_status,
 )
 from autotrain.util.signals import is_shutting_down
+from autotrain.watchdog.gpu import query_gpu_local, query_gpu_ssh
 from autotrain.watchdog.monitor import WatchdogMonitor
 
 log = structlog.get_logger()
@@ -88,7 +89,7 @@ class AgentLoop:
             config.watchdog, self._repo,
             on_alert=self._on_watchdog_alert,
             gpu_query_fn=self._build_gpu_query_fn(),
-            db_conn=self._conn,
+            db_path=db_path,
             run_id=self._run_id,
         )
 
@@ -479,6 +480,12 @@ class AgentLoop:
                 setup_command=cfg.ssh_setup_command,
             )
         return LocalExecutor(working_dir=self._repo)
+
+    def _build_gpu_query_fn(self):
+        """Build GPU query callable based on execution mode (local vs SSH)."""
+        if self._config.execution.mode == "ssh":
+            return lambda: query_gpu_ssh(self._executor._ssh_run)
+        return query_gpu_local
 
     def _on_watchdog_alert(self, message: str) -> None:
         self._notifier.notify("error", message=message)

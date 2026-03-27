@@ -28,16 +28,19 @@ class WatchdogMonitor:
         repo_path: Path,
         on_alert: Callable | None = None,
         gpu_query_fn: Callable[[], list[dict]] | None = None,
-        db_conn: sqlite3.Connection | None = None,
+        db_path: Path | None = None,
         run_id: str | None = None,
+        # Legacy: accept db_conn but ignore it (thread-unsafe)
+        db_conn: sqlite3.Connection | None = None,
     ) -> None:
         self._config = config
         self._repo_path = repo_path
         self._on_alert = on_alert
         self._gpu_query_fn = gpu_query_fn
-        self._db_conn = db_conn
+        self._db_path = db_path
         self._run_id = run_id
         self._thread: threading.Thread | None = None
+        self._thread_conn: sqlite3.Connection | None = None
         self._last_stdout_time = time.monotonic()
         self._alerts: list[str] = []
 
@@ -61,12 +64,25 @@ class WatchdogMonitor:
         return list(self._alerts)
 
     def _run(self) -> None:
-        while not is_shutting_down():
+        # Open a thread-local DB connection (SQLite forbids cross-thread usage)
+        if self._db_path and self._run_id:
             try:
-                self._check_all()
+                self._thread_conn = sqlite3.connect(str(self._db_path))
+                self._thread_conn.row_factory = sqlite3.Row
+                self._thread_conn.execute("PRAGMA journal_mode=WAL")
             except Exception as e:
-                log.error("watchdog_check_error", error=str(e))
-            time.sleep(self._config.check_interval_seconds)
+                log.debug("watchdog_db_open_failed", error=str(e))
+
+        try:
+            while not is_shutting_down():
+                try:
+                    self._check_all()
+                except Exception as e:
+                    log.error("watchdog_check_error", error=str(e))
+                time.sleep(self._config.check_interval_seconds)
+        finally:
+            if self._thread_conn:
+                self._thread_conn.close()
 
     def _check_all(self) -> None:
         # Disk space
@@ -105,8 +121,8 @@ class WatchdogMonitor:
                     f"{free_mb:.0f}MB free"
                 )
 
-            # Store to DB if available
-            if self._db_conn and self._run_id:
+            # Store to DB if available (thread-local connection)
+            if self._thread_conn and self._run_id:
                 try:
                     snapshot = GpuSnapshot(
                         run_id=self._run_id,
@@ -116,7 +132,7 @@ class WatchdogMonitor:
                         memory_total_mb=gpu.get("memory_total_mb"),
                         temperature_c=gpu.get("temperature_c"),
                     )
-                    record_gpu_snapshot(self._db_conn, snapshot)
+                    record_gpu_snapshot(self._thread_conn, snapshot)
                 except Exception as e:
                     log.debug("gpu_snapshot_write_failed", error=str(e))
 

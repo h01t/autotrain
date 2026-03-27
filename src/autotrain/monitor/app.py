@@ -23,6 +23,8 @@ from autotrain.storage.queries import (
     get_all_metric_snapshots,
     get_all_runs,
     get_epoch_metrics,
+    get_gpu_snapshots,
+    get_latest_gpu_snapshot,
     get_latest_run,
     get_recent_iterations,
 )
@@ -261,6 +263,9 @@ def main():
     # -- Cost & Budget Tracker --
     st.subheader("Cost & Budget")
     _render_budget(run)
+
+    # -- GPU Resources --
+    _render_gpu_section(conn, run.id)
 
     conn.close()
 
@@ -507,6 +512,79 @@ def _render_budget(run) -> None:
             st.caption(
                 f"Rate: ~${rate_per_iter:.3f}/iter, ~{_fmt_duration(time_per_iter)}/iter"
             )
+
+
+# ---------------------------------------------------------------------------
+# GPU Resources
+# ---------------------------------------------------------------------------
+
+def _render_gpu_section(conn: sqlite3.Connection, run_id: str) -> None:
+    """Render GPU utilization, memory, and temperature metrics."""
+    latest = get_latest_gpu_snapshot(conn, run_id)
+    snapshots = get_gpu_snapshots(conn, run_id, limit=500)
+
+    if not latest and not snapshots:
+        return  # No GPU data — skip section entirely
+
+    st.subheader("GPU Resources")
+
+    # Current values
+    if latest:
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("GPU Utilization", f"{latest.utilization_pct:.0f}%" if latest.utilization_pct is not None else "N/A")
+
+        if latest.memory_used_mb is not None and latest.memory_total_mb:
+            mem_pct = (latest.memory_used_mb / latest.memory_total_mb) * 100
+            col2.metric("Memory Used", f"{latest.memory_used_mb:.0f} / {latest.memory_total_mb:.0f} MB")
+            col3.metric("Memory %", f"{mem_pct:.0f}%")
+        else:
+            col2.metric("Memory Used", "N/A")
+            col3.metric("Memory %", "N/A")
+
+        col4.metric("Temperature", f"{latest.temperature_c:.0f}°C" if latest.temperature_c is not None else "N/A")
+
+    # History chart
+    if snapshots:
+        timestamps = [s.timestamp for s in snapshots]
+        util_vals = [s.utilization_pct for s in snapshots]
+        mem_pct_vals = [
+            (s.memory_used_mb / s.memory_total_mb * 100)
+            if s.memory_used_mb is not None and s.memory_total_mb
+            else None
+            for s in snapshots
+        ]
+        temp_vals = [s.temperature_c for s in snapshots]
+
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x=timestamps, y=util_vals, mode="lines",
+            name="GPU Util %",
+            line=dict(color="#3b82f6", width=2),
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=timestamps, y=mem_pct_vals, mode="lines",
+            name="Memory %",
+            line=dict(color="#22c55e", width=2),
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=timestamps, y=temp_vals, mode="lines",
+            name="Temp °C",
+            yaxis="y2",
+            line=dict(color="#ef4444", width=1, dash="dot"),
+        ))
+
+        fig.update_layout(
+            xaxis_title="Time",
+            yaxis=dict(title="Utilization / Memory %", range=[0, 100]),
+            yaxis2=dict(title="Temperature °C", overlaying="y", side="right"),
+            height=300,
+            margin=dict(l=40, r=60, t=20, b=40),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        st.plotly_chart(fig, width="stretch")
 
 
 # ---------------------------------------------------------------------------
