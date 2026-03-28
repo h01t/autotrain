@@ -60,7 +60,7 @@ TRANSITIONS: dict[AgentState, set[AgentState]] = {
     },
     AgentState.EXECUTING: {
         AgentState.EXTRACTING, AgentState.READING_STATE,
-        AgentState.FAILED, AgentState.STOPPED,
+        AgentState.BUDGET_EXHAUSTED, AgentState.FAILED, AgentState.STOPPED,
     },
     AgentState.EXTRACTING: {
         AgentState.EVALUATING, AgentState.READING_STATE, AgentState.FAILED,

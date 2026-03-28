@@ -35,11 +35,12 @@ def cli():
 )
 @click.option("--model", "agent_model", default=None, help="LLM model name")
 @click.option("--api-base", default=None, help="API base URL (for Ollama)")
+@click.option("--dashboard-url", default=None, help="Dashboard URL for remote agent (e.g. ws://myhost:8000)")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 def run(
     repo, metric, target, budget, max_iterations, gpu, direction,
     train_command, config_file, ssh_host, ssh_remote_dir, webhook,
-    provider, agent_model, api_base, verbose,
+    provider, agent_model, api_base, dashboard_url, verbose,
 ):
     """Start an autonomous training run."""
     from autotrain.config.loader import load_config
@@ -75,6 +76,8 @@ def run(
         overrides["execution"]["ssh_host"] = ssh_host
     if ssh_remote_dir:
         overrides["execution"]["ssh_remote_dir"] = ssh_remote_dir
+    if dashboard_url:
+        overrides["execution"]["dashboard_url"] = dashboard_url
     if webhook:
         overrides["notify"] = {"webhook_url": webhook}
     if provider or agent_model or api_base:
@@ -100,7 +103,7 @@ def run(
 
     click.echo(f"AutoTrain v{__version__} starting")
     click.echo(f"  Repo: {repo_path}")
-    click.echo(f"  Target: {metric} {'>=' if direction == 'maximize' else '<='} {target}")
+    click.echo(f"  Target: {config.metric.name} {'>=' if config.metric.direction == 'maximize' else '<='} {config.metric.target}")
     click.echo(f"  Budget: {budget}")
     click.echo(f"  Logs: {log_file}")
     click.echo()
@@ -210,10 +213,48 @@ def stop(repo):
 
 @cli.command()
 @click.option("--repo", default=".", type=click.Path(exists=True), help="Path to ML project")
+@click.option("--port", default=8000, type=int, help="Dashboard server port")
+@click.option("--host", default="127.0.0.1", help="Dashboard server host")
+@click.option("--no-browser", is_flag=True, help="Don't open browser automatically")
+def dashboard(repo, port, host, no_browser):
+    """Open the web monitoring dashboard (React + FastAPI)."""
+    import uvicorn
+
+    from autotrain.dashboard.server import create_app
+
+    repo_path = Path(repo).resolve()
+    db_path = repo_path / ".autotrain" / "state.db"
+
+    if not db_path.exists():
+        click.echo("No AutoTrain data found. Run a training first.", err=True)
+        raise SystemExit(1)
+
+    app = create_app(db_path)
+
+    # Always open browser at localhost (0.0.0.0 is a bind address, not browsable)
+    browse_host = "127.0.0.1" if host == "0.0.0.0" else host
+
+    click.echo(f"Starting AutoTrain Dashboard on http://{browse_host}:{port}")
+    click.echo(f"  Database: {db_path}")
+    click.echo(f"  API docs: http://{browse_host}:{port}/docs")
+
+    if not no_browser:
+        import webbrowser
+        import threading
+        threading.Timer(1.0, lambda: webbrowser.open(f"http://{browse_host}:{port}")).start()
+
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="info")
+    except KeyboardInterrupt:
+        click.echo("\nDashboard stopped.")
+
+
+@cli.command()
+@click.option("--repo", default=".", type=click.Path(exists=True), help="Path to ML project")
 @click.option("--port", default=8501, type=int, help="Streamlit server port")
 @click.option("--refresh", default=10, type=int, help="Auto-refresh interval in seconds")
 def monitor(repo, port, refresh):
-    """Open the monitoring dashboard in your browser."""
+    """Open the Streamlit monitoring dashboard (legacy)."""
     import subprocess
 
     repo_path = Path(repo).resolve()

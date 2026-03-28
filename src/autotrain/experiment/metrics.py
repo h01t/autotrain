@@ -4,10 +4,20 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 
 import structlog
 
 log = structlog.get_logger()
+
+
+@dataclass
+class MetricResult:
+    """Structured result from metric extraction."""
+
+    value: float | None
+    error: str | None = None  # why extraction failed (None if value found)
+
 
 # Patterns for detecting epoch-level output lines
 _YOLO_EPOCH_RE = re.compile(
@@ -29,6 +39,21 @@ _YOLO_VAL_RE = re.compile(
 # Keras-style: "Epoch 3/50 - loss: 0.15 - val_acc: 0.92"
 _KERAS_EPOCH_RE = re.compile(
     r"Epoch\s+(\d+)/(\d+)"
+)
+
+# HuggingFace Trainer: {'loss': 0.42, 'learning_rate': 5e-05, 'epoch': 1.0}
+_HF_EPOCH_RE = re.compile(
+    r"\{[^}]*'epoch'\s*:\s*([\d.]+)[^}]*\}"
+)
+
+# Lightning/tqdm: "Epoch 3: 100%|..., loss=0.15, val_acc=0.89"
+_LIGHTNING_EPOCH_RE = re.compile(
+    r"Epoch\s+(\d+)\s*:"
+)
+
+# Generic: any line with "epoch" and key=value pairs
+_GENERIC_EPOCH_RE = re.compile(
+    r"epoch\s*[=:]\s*(\d+)", re.IGNORECASE
 )
 
 
@@ -66,6 +91,37 @@ def parse_epoch_line(line: str) -> tuple[int | None, dict[str, float]]:
     if m:
         epoch = int(m.group(1))
         metrics = _try_common_patterns(line)
+        if metrics:
+            return epoch, metrics
+
+    # HuggingFace Trainer: {'loss': 0.42, 'epoch': 1.0}
+    m = _HF_EPOCH_RE.search(line)
+    if m:
+        epoch = int(float(m.group(1)))
+        # Parse the dict-like output as JSON (single→double quotes)
+        metrics = _try_json(line.replace("'", '"'))
+        if not metrics:
+            metrics = _try_common_patterns(line)
+        # Remove 'epoch' from metrics — it's metadata, not a training metric
+        metrics.pop("epoch", None)
+        if metrics:
+            return epoch, metrics
+
+    # Lightning/tqdm: "Epoch 3: ..., loss=0.15, val_acc=0.89"
+    m = _LIGHTNING_EPOCH_RE.search(line)
+    if m:
+        epoch = int(m.group(1))
+        metrics = _try_common_patterns(line)
+        if metrics:
+            return epoch, metrics
+
+    # Generic: any line with "epoch=N" or "epoch: N" + key=value pairs
+    m = _GENERIC_EPOCH_RE.search(line)
+    if m:
+        epoch = int(m.group(1))
+        metrics = _try_common_patterns(line)
+        # Remove 'epoch' from metrics
+        metrics.pop("epoch", None)
         if metrics:
             return epoch, metrics
 
@@ -109,17 +165,37 @@ def extract_metric_from_output(
     output: str,
     metric_name: str,
     regex_pattern: str | None = None,
-) -> float | None:
+) -> MetricResult:
     """Extract the final value of a metric from full training output.
 
     Scans all lines and returns the last occurrence of the metric.
+    Returns MetricResult with value and/or error explanation.
     """
+    lines = output.splitlines()
+    if not lines or not output.strip():
+        return MetricResult(value=None, error="Output was empty (0 lines)")
+
     last_value = None
-    for line in output.splitlines():
+    all_found_keys: set[str] = set()
+    for line in lines:
         metrics = extract_metrics_from_line(line, metric_name, regex_pattern)
+        all_found_keys.update(metrics.keys())
         if metric_name in metrics:
             last_value = metrics[metric_name]
-    return last_value
+
+    if last_value is not None:
+        return MetricResult(value=last_value)
+
+    if all_found_keys:
+        return MetricResult(
+            value=None,
+            error=f"Found metrics {sorted(all_found_keys)} but not '{metric_name}'",
+        )
+
+    return MetricResult(
+        value=None,
+        error=f"No metrics found in {len(lines)} lines of output",
+    )
 
 
 def _try_json(line: str) -> dict[str, float]:
@@ -160,7 +236,10 @@ _COMMON_PATTERNS = [
 
 
 def _try_common_patterns(line: str) -> dict[str, float]:
-    """Try common key=value and key: value patterns."""
+    """Try common key=value and key: value patterns.
+
+    Ignores lines with >10 matches — these are likely config dumps, not metric lines.
+    """
     metrics: dict[str, float] = {}
     for pattern in _COMMON_PATTERNS:
         for match in pattern.finditer(line):
@@ -170,4 +249,7 @@ def _try_common_patterns(line: str) -> dict[str, float]:
                 metrics[key] = value
             except ValueError:
                 continue
+    # Config dump heuristic: real metric lines have a few values, not 50
+    if len(metrics) > 10:
+        return {}
     return metrics

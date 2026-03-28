@@ -33,10 +33,10 @@ def format_history_for_prompt(
     lines.append(f"## Recent Experiments (last {len(recent)})")
     lines.append("")
     lines.append(
-        "| # | Metric | Outcome | Duration | Changes |"
+        "| # | Metric | Outcome | Duration | Changes | Error |"
     )
     lines.append(
-        "|---|--------|---------|----------|---------|"
+        "|---|--------|---------|----------|---------|-------|"
     )
 
     for it in recent:
@@ -44,9 +44,15 @@ def format_history_for_prompt(
         outcome_str = it.outcome.value if it.outcome else "?"
         duration_str = f"{it.duration_seconds:.0f}s" if it.duration_seconds else "?"
         changes_str = (it.changes_summary or "")[:50]
+        error_str = ""
+        if it.error_message and it.outcome and it.outcome.value in (
+            "crashed", "script_error", "timeout",
+        ):
+            # First line, truncated — enough for the agent to understand
+            error_str = it.error_message.split("\n")[0][:80]
         lines.append(
             f"| {it.iteration_num} | {metric_str} | {outcome_str} "
-            f"| {duration_str} | {changes_str} |"
+            f"| {duration_str} | {changes_str} | {error_str} |"
         )
 
     # Best experiments

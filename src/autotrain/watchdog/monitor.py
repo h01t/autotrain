@@ -30,6 +30,7 @@ class WatchdogMonitor:
         gpu_query_fn: Callable[[], list[dict]] | None = None,
         db_path: Path | None = None,
         run_id: str | None = None,
+        agent_connected_fn: Callable[[], bool] | None = None,
         # Legacy: accept db_conn but ignore it (thread-unsafe)
         db_conn: sqlite3.Connection | None = None,
     ) -> None:
@@ -39,6 +40,7 @@ class WatchdogMonitor:
         self._gpu_query_fn = gpu_query_fn
         self._db_path = db_path
         self._run_id = run_id
+        self._agent_connected_fn = agent_connected_fn
         self._thread: threading.Thread | None = None
         self._thread_conn: sqlite3.Connection | None = None
         self._last_stdout_time = time.monotonic()
@@ -104,6 +106,10 @@ class WatchdogMonitor:
     def _collect_gpu_metrics(self) -> None:
         """Collect GPU metrics, store to DB, and check memory thresholds."""
         if not self._gpu_query_fn:
+            return
+
+        # Skip polling if a remote agent is pushing metrics directly
+        if self._agent_connected_fn and self._agent_connected_fn():
             return
 
         try:

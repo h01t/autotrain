@@ -24,6 +24,7 @@ class IterationOutcome(StrEnum):
     REGRESSED = "regressed"
     NO_CHANGE = "no_change"
     CRASHED = "crashed"
+    SCRIPT_ERROR = "script_error"  # Non-zero exit code (distinct from no-metric)
     SANDBOX_REJECTED = "sandbox_rejected"
     TIMEOUT = "timeout"
 

@@ -24,6 +24,7 @@ class LocalExecutor:
         self._process: subprocess.Popen | None = None
         self._result: ExecutionResult | None = None
         self._start_time: float = 0
+        self._output_lines: list[str] = []
 
     def setup(self, repo_path: Path | None = None) -> None:
         """Validate working directory exists."""
@@ -45,6 +46,7 @@ class LocalExecutor:
 
         self._start_time = time.monotonic()
         self._result = None
+        self._output_lines = []
 
         log.info("local_exec_start", command=command, timeout=timeout_seconds)
 
@@ -59,17 +61,32 @@ class LocalExecutor:
         )
 
         try:
+            from autotrain.util.signals import is_shutting_down
+
             deadline = time.monotonic() + timeout_seconds
             for line in iter(self._process.stdout.readline, b""):
                 decoded = line.decode("utf-8", errors="replace").rstrip()
+                self._output_lines.append(decoded)
                 yield decoded
+
+                if is_shutting_down():
+                    log.info("local_exec_shutdown_signal")
+                    self._kill_process()
+                    self._result = ExecutionResult(
+                        exit_code=-15,
+                        stdout=self._captured_stdout(),
+                        stderr="Killed: shutdown signal",
+                        duration_seconds=time.monotonic() - self._start_time,
+                        was_killed=True,
+                    )
+                    return
 
                 if time.monotonic() > deadline:
                     log.warning("local_exec_timeout", timeout=timeout_seconds)
                     self._kill_process()
                     self._result = ExecutionResult(
                         exit_code=-1,
-                        stdout="",
+                        stdout=self._captured_stdout(),
                         stderr="Killed: timeout exceeded",
                         duration_seconds=time.monotonic() - self._start_time,
                         was_timeout=True,
@@ -81,7 +98,7 @@ class LocalExecutor:
 
             self._result = ExecutionResult(
                 exit_code=self._process.returncode,
-                stdout="",  # Already streamed
+                stdout=self._captured_stdout(),
                 stderr="",
                 duration_seconds=duration,
             )
@@ -118,7 +135,7 @@ class LocalExecutor:
         if self._result is None:
             self._result = ExecutionResult(
                 exit_code=-9,
-                stdout="",
+                stdout=self._captured_stdout(),
                 stderr="Killed by watchdog/user",
                 duration_seconds=time.monotonic() - self._start_time if self._start_time else 0,
                 was_killed=True,
@@ -142,6 +159,10 @@ class LocalExecutor:
     def cleanup(self) -> None:
         """Ensure process is terminated."""
         self._kill_process()
+
+    def _captured_stdout(self) -> str:
+        """Return last 200 lines of captured output."""
+        return "\n".join(self._output_lines[-200:])
 
     def _kill_process(self) -> None:
         """Kill the process group (SIGTERM then SIGKILL)."""

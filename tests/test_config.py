@@ -94,7 +94,7 @@ class TestRunConfig:
             metric=MetricConfig(name="val_auc", target=0.85),
         )
         assert config.repo_path == repo
-        assert config.budget.experiment_timeout_seconds == 900
+        assert config.budget.experiment_timeout_seconds == 1800
 
     def test_path_resolved(self, tmp_dir):
         repo = tmp_dir / "repo"

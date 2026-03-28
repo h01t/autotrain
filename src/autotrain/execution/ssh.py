@@ -37,6 +37,7 @@ class SSHExecutor:
         self._setup_command = setup_command
         self._result: ExecutionResult | None = None
         self._start_time: float = 0
+        self._output_lines: list[str] = []
 
         self._ssh_opts = [
             "-o", "ServerAliveInterval=30",
@@ -104,6 +105,7 @@ class SSHExecutor:
         """
         self._start_time = time.monotonic()
         self._result = None
+        self._output_lines = []
 
         remote_log = f"{self._remote_dir}/.autotrain/train_output.log"
         remote_pid = f"{self._remote_dir}/.autotrain/train.pid"
@@ -146,10 +148,15 @@ class SSHExecutor:
         timeout_seconds: int,
     ) -> Iterator[str]:
         """Tail remote log with reconnect on SSH drop."""
+        import select
+
+        from autotrain.util.signals import is_shutting_down
+
         deadline = time.monotonic() + timeout_seconds
         lines_seen = 0
+        last_alive_check = 0.0
 
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and not is_shutting_down():
             try:
                 # tail from where we left off, using --pid so tail exits
                 # when the training process dies
@@ -164,17 +171,40 @@ class SSHExecutor:
                     stderr=subprocess.PIPE,
                 )
 
-                for line in iter(proc.stdout.readline, b""):
-                    decoded = line.decode("utf-8", errors="replace").rstrip()
-                    lines_seen += 1
-                    yield decoded
+                while time.monotonic() < deadline and not is_shutting_down():
+                    # Use select with timeout so we can periodically check
+                    # if the remote process is still alive (tail --pid is unreliable)
+                    ready, _, _ = select.select([proc.stdout], [], [], 10.0)
 
-                    if time.monotonic() > deadline:
-                        proc.terminate()
-                        self._finalize_result(remote_pid, was_timeout=True)
-                        return
+                    if ready:
+                        line = proc.stdout.readline()
+                        if not line:
+                            break  # EOF — tail exited
+                        decoded = line.decode("utf-8", errors="replace").rstrip()
+                        lines_seen += 1
+                        last_alive_check = 0.0  # Reset check timer on activity
+                        self._output_lines.append(decoded)
+                        yield decoded
+                    else:
+                        # No output for 10s — check if remote process is done
+                        now = time.monotonic()
+                        if now - last_alive_check > 10.0:
+                            last_alive_check = now
+                            if not self._is_remote_process_alive(remote_pid):
+                                log.info("ssh_remote_process_exited")
+                                # Drain remaining output
+                                for trailing in proc.stdout:
+                                    decoded = trailing.decode("utf-8", errors="replace").rstrip()
+                                    if decoded:
+                                        lines_seen += 1
+                                        self._output_lines.append(decoded)
+                                        yield decoded
+                                proc.terminate()
+                                self._finalize_result(remote_pid, was_timeout=False)
+                                return
 
-                proc.wait()
+                proc.terminate()
+                proc.wait(timeout=5)
 
                 # tail -f ended — check if training is done
                 if not self._is_remote_process_alive(remote_pid):
@@ -207,7 +237,7 @@ class SSHExecutor:
 
         self._result = ExecutionResult(
             exit_code=exit_code,
-            stdout="",
+            stdout=self._captured_stdout(),
             stderr="",
             duration_seconds=duration,
             was_timeout=was_timeout,
@@ -247,7 +277,7 @@ class SSHExecutor:
 
         if self._result is None:
             self._result = ExecutionResult(
-                exit_code=-9, stdout="", stderr="Killed",
+                exit_code=-9, stdout=self._captured_stdout(), stderr="Killed",
                 duration_seconds=time.monotonic() - self._start_time,
                 was_killed=True,
             )
@@ -275,6 +305,10 @@ class SSHExecutor:
     def cleanup(self) -> None:
         """Kill remote process if still running."""
         self.kill()
+
+    def _captured_stdout(self) -> str:
+        """Return last 200 lines of captured output."""
+        return "\n".join(self._output_lines[-200:])
 
     def _ssh_run(
         self, command: str, timeout: int = 30, check: bool = True,

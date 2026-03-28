@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import structlog
 
@@ -13,6 +14,7 @@ from autotrain.config.defaults import MAX_CONSECUTIVE_CRASHES, MAX_SANDBOX_RETRI
 from autotrain.config.schema import RunConfig
 from autotrain.core.budget import BudgetExhausted, BudgetTracker
 from autotrain.core.state_machine import AgentState, StateMachine
+from autotrain.execution.base import ExecutionResult
 from autotrain.execution.local import LocalExecutor
 from autotrain.execution.ssh import SSHExecutor
 from autotrain.experiment.evaluator import is_improved, is_target_hit
@@ -23,7 +25,7 @@ from autotrain.experiment.git_ops import (
     init_repo,
     revert_last_commit,
 )
-from autotrain.experiment.metrics import extract_metric_from_output, parse_epoch_line
+from autotrain.experiment.metrics import MetricResult, extract_metric_from_output, parse_epoch_line
 from autotrain.experiment.sandbox import (
     FileChange,
     format_rejection_message,
@@ -49,7 +51,7 @@ from autotrain.storage.queries import (
     update_run_best,
     update_run_status,
 )
-from autotrain.util.signals import is_shutting_down
+from autotrain.util.signals import is_shutting_down, register_shutdown_callback
 from autotrain.watchdog.gpu import query_gpu_local, query_gpu_ssh
 from autotrain.watchdog.monitor import WatchdogMonitor
 
@@ -85,6 +87,7 @@ class AgentLoop:
             terminal=config.notify.terminal,
         )
         self._executor = self._create_executor()
+        register_shutdown_callback(self._executor.kill)
         self._watchdog = WatchdogMonitor(
             config.watchdog, self._repo,
             on_alert=self._on_watchdog_alert,
@@ -99,6 +102,7 @@ class AgentLoop:
         self._system_prompt = build_system_prompt(config, self._template)
         self._consecutive_crashes = 0
         self._resume_checkpoint: str | None = None  # Set after crash if checkpoint found
+        self._last_error: str | None = None  # Error from last crashed iteration
 
     def run(self) -> RunStatus:
         """Execute the full agent loop. Returns final status."""
@@ -134,9 +138,42 @@ class AgentLoop:
         finally:
             self._watchdog.stop()
             self._executor.cleanup()
+            # Kill remote agent if running
+            if isinstance(self._executor, SSHExecutor):
+                try:
+                    self._executor._ssh_run(
+                        "pkill -f 'standalone.py.*ws/agent' 2>/dev/null || true",
+                        timeout=10, check=False,
+                    )
+                except Exception:
+                    pass
+
+    def _validate_config(self) -> None:
+        """Validate configuration before starting. Fail fast with clear messages."""
+        # 5C: Validate train_command
+        cmd = self._config.execution.train_command
+        if cmd == "python train.py" and not (self._repo / "train.py").exists():
+            py_files = [f.name for f in self._repo.glob("*.py")]
+            raise FileNotFoundError(
+                f"Default train_command 'python train.py' but train.py not found. "
+                f"Available .py files: {py_files or 'none'}. "
+                f"Set execution.train_command in autotrain.yaml."
+            )
+
+        # 5D: Validate writable_files exist
+        existing = [
+            f for f in self._config.sandbox.writable_files
+            if (self._repo / f).exists()
+        ]
+        if not existing:
+            raise FileNotFoundError(
+                f"No writable files found: {self._config.sandbox.writable_files}. "
+                f"Check sandbox.writable_files in autotrain.yaml."
+            )
 
     def _initialize(self) -> None:
         """Set up git, DB records, and state machine."""
+        self._validate_config()
         init_repo(self._repo)
         branch = f"autotrain/{self._run_id}"
         create_branch(self._repo, branch)
@@ -156,6 +193,14 @@ class AgentLoop:
         self._sm = StateMachine(self._conn, self._run_id)
         self._sm.transition(AgentState.READING_STATE)
         self._executor.setup(repo_path=self._repo)
+
+        # Start remote metrics agent on the GPU machine if configured
+        if (
+            self._config.execution.mode == "ssh"
+            and self._config.execution.dashboard_url
+            and isinstance(self._executor, SSHExecutor)
+        ):
+            self._start_remote_agent()
 
     def _run_iteration(self) -> None:
         """Execute one complete iteration of the agent loop."""
@@ -179,13 +224,15 @@ class AgentLoop:
         try:
             # 1. Call agent
             self._sm.transition(AgentState.CALLING_AGENT)
-            decision = self._call_agent_with_validation(iteration_num)
+            decision, rejection_detail = self._call_agent_with_validation(iteration_num)
             if decision is None:
                 # Sandbox rejected too many times
                 update_iteration(
                     self._conn, iteration_id,
                     outcome=IterationOutcome.SANDBOX_REJECTED,
+                    error_message=rejection_detail,
                 )
+                self._last_error = rejection_detail
                 self._sm.transition(AgentState.READING_STATE)
                 return
 
@@ -207,15 +254,33 @@ class AgentLoop:
 
             # 4. Extract metrics
             self._sm.transition(AgentState.EXTRACTING)
-            metric_value = extract_metric_from_output(
+            metric_result = extract_metric_from_output(
                 output,
                 self._config.metric.name,
                 self._config.metric.extraction_pattern,
             )
+            metric_value = metric_result.value
 
             # 5. Evaluate
             self._sm.transition(AgentState.EVALUATING)
-            outcome = self._evaluate(metric_value, iteration_num, iteration_id)
+            exec_result = self._executor.get_result()
+
+            # Build error message for failed iterations
+            error_message = None
+            if metric_value is None:
+                error_parts = []
+                if exec_result.exit_code != 0:
+                    error_parts.append(f"Exit code: {exec_result.exit_code}")
+                if metric_result.error:
+                    error_parts.append(metric_result.error)
+                # Include last 30 lines of output for context
+                tail = "\n".join(output.splitlines()[-30:])
+                if tail:
+                    error_parts.append(f"--- Last output ---\n{tail}")
+                error_message = "\n".join(error_parts) if error_parts else "Unknown error"
+                self._last_error = error_message
+
+            outcome = self._evaluate(metric_value, iteration_num, iteration_id, exec_result)
 
             if outcome == IterationOutcome.REGRESSED:
                 revert_last_commit(self._repo)
@@ -228,6 +293,7 @@ class AgentLoop:
                     metric_name=self._config.metric.name,
                     value=metric_value,
                 ))
+                self._last_error = None  # Clear error on success
 
             # Detect checkpoint created by this training run
             checkpoint = self._executor.detect_checkpoint(
@@ -244,9 +310,11 @@ class AgentLoop:
                 agent_hypothesis=decision.hypothesis,
                 changes_summary=decision.hypothesis[:200],
                 checkpoint_path=checkpoint,
+                error_message=error_message,
             )
 
-            self._consecutive_crashes = 0
+            if metric_value is not None:
+                self._consecutive_crashes = 0
 
             # 6. Check target
             if metric_value and is_target_hit(metric_value, self._config.metric):
@@ -311,7 +379,10 @@ class AgentLoop:
                     self._sm.transition(AgentState.FAILED)
 
     def _call_agent_with_validation(self, iteration_num):
-        """Call agent and validate response, retrying on sandbox rejection."""
+        """Call agent and validate response, retrying on sandbox rejection.
+
+        Returns (decision, rejection_detail) tuple. decision is None if all retries exhausted.
+        """
         from autotrain.storage.queries import get_run
 
         run = get_run(self._conn, self._run_id)
@@ -327,7 +398,7 @@ class AgentLoop:
                 current_best=run.best_metric_value,
                 iteration_num=iteration_num,
                 current_files=current_files,
-                last_error=rejection_msg,
+                last_error=rejection_msg or self._last_error,
                 stagnant=(
                     self._consecutive_crashes
                     >= self._config.agent.stagnation_threshold
@@ -351,12 +422,12 @@ class AgentLoop:
                 decision.changes, self._config.sandbox, current_files,
             )
             if result.is_valid:
-                return decision
+                return decision, None
 
-            rejection_msg = format_rejection_message(result)
+            rejection_msg = format_rejection_message(result, current_files)
             log.warning("sandbox_rejected", errors=result.errors, attempt=attempt)
 
-        return None
+        return None, rejection_msg
 
     def _apply_changes(self, changes: list[FileChange]) -> None:
         """Apply file changes to the repo."""
@@ -377,7 +448,9 @@ class AgentLoop:
         current_epoch = 0
         pending_val_metrics: dict[str, float] = {}
 
-        env = {"CUDA_VISIBLE_DEVICES": self._config.execution.gpu_device or "0"}
+        env = {}
+        if self._config.execution.gpu_device is not None:
+            env["CUDA_VISIBLE_DEVICES"] = self._config.execution.gpu_device
         if self._resume_checkpoint:
             env["AUTOTRAIN_RESUME_FROM"] = self._resume_checkpoint
             log.info("resuming_from_checkpoint", path=self._resume_checkpoint)
@@ -390,6 +463,12 @@ class AgentLoop:
         ):
             output_lines.append(line)
             self._watchdog.report_stdout_activity()
+
+            # Respond to shutdown signal immediately
+            if is_shutting_down():
+                log.info("shutdown_during_training")
+                self._executor.kill()
+                break
 
             # Check time budget mid-training — don't let a single run exceed total budget
             if (
@@ -437,12 +516,19 @@ class AgentLoop:
         )
 
     def _evaluate(
-        self, metric_value: float | None, iteration_num: int, iteration_id: int,
+        self,
+        metric_value: float | None,
+        iteration_num: int,
+        iteration_id: int,
+        exec_result: ExecutionResult | None = None,
     ) -> IterationOutcome:
         """Evaluate the experiment result."""
         from autotrain.storage.queries import get_run
 
         if metric_value is None:
+            self._consecutive_crashes += 1
+            if exec_result and exec_result.exit_code != 0:
+                return IterationOutcome.SCRIPT_ERROR
             return IterationOutcome.CRASHED
 
         run = get_run(self._conn, self._run_id)
@@ -466,6 +552,73 @@ class AgentLoop:
             if filepath.exists():
                 files[filename] = filepath.read_text()
         return files
+
+    def _remote_python(self) -> str:
+        """Extract Python executable path for the remote machine.
+
+        Infers from train_command if it contains a path (e.g. '.venv/bin/python'),
+        otherwise falls back to 'python3'.
+        """
+        cmd = self._config.execution.train_command
+        # If train_command starts with a python path, use it
+        parts = cmd.split()
+        if parts and ("python" in parts[0] or parts[0].endswith("/python3")):
+            return parts[0]
+        return "python3"
+
+    def _start_remote_agent(self) -> None:
+        """Deploy and start the remote metrics agent on the GPU machine."""
+        cfg = self._config.execution
+        base_url = cfg.dashboard_url.rstrip("/")
+        agent_url = f"{base_url}/ws/agent/{self._run_id}"
+        remote_dir = cfg.ssh_remote_dir
+        log_path = f"{remote_dir}/.autotrain/train_output.log"
+
+        # Kill any existing remote agent
+        self._executor._ssh_run(
+            "pkill -f 'standalone.py.*ws/agent' 2>/dev/null || true",
+            timeout=10, check=False,
+        )
+
+        # Deploy standalone agent script (single file, no package dependency)
+        agent_script = Path(__file__).parent.parent / "remote_agent" / "standalone.py"
+        if not agent_script.exists():
+            log.warning("remote_agent_script_not_found", path=str(agent_script))
+            return
+
+        import subprocess as _sp
+        ssh_opts = self._executor._ssh_opts
+        host = self._executor._host
+        remote_script = f"{remote_dir}/.autotrain/standalone.py"
+
+        try:
+            # Copy script to remote
+            _sp.run(
+                ["scp"] + ["-P", str(cfg.ssh_port)] + [str(agent_script), f"{host}:{remote_script}"],
+                check=True, capture_output=True, timeout=15,
+            )
+
+            # Ensure websockets is available for the remote agent
+            python_cmd = self._remote_python()
+            self._executor._ssh_run(
+                f"cd {remote_dir} && {python_cmd} -c 'import websockets' 2>/dev/null "
+                f"|| {python_cmd} -m pip install websockets -q 2>/dev/null || true",
+                timeout=60, check=False,
+            )
+
+            # Start it in the background
+            cmd = (
+                f"cd {remote_dir} && "
+                f"nohup {python_cmd} {remote_script} "
+                f"--server '{agent_url}' "
+                f"--log-path '{log_path}' "
+                f"--interval 1.0 "
+                f"> {remote_dir}/.autotrain/remote_agent.log 2>&1 </dev/null &"
+            )
+            self._executor._ssh_run(cmd, timeout=10, check=False)
+            log.info("remote_agent_started", url=agent_url)
+        except Exception as e:
+            log.warning("remote_agent_start_failed", error=str(e))
 
     def _create_executor(self):
         """Create the appropriate executor based on config."""

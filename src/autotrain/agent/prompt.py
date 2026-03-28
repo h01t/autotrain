@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from autotrain.agent.framework_detector import detect_framework
 from autotrain.config.schema import RunConfig
 from autotrain.experiment.history import format_history_for_prompt
 
@@ -27,7 +28,25 @@ def build_system_prompt(
     prompt = prompt.replace("{{ writable_files }}", writable)
     prompt = prompt.replace("{{ experiment_timeout }}", f"{timeout_min} minutes")
 
+    # Dynamic strategy section based on detected framework
+    hint = detect_framework(config.repo_path, config.sandbox.writable_files)
+    strategy = _load_strategy(hint.name)
+    prompt = prompt.replace("{{ strategy_section }}", strategy)
+
     return prompt
+
+
+def _load_strategy(framework: str) -> str:
+    """Load the strategy file for a framework, falling back to generic."""
+    strategies_dir = Path(__file__).parent / "templates" / "strategies"
+
+    strategy_file = strategies_dir / f"{framework}.md"
+    if strategy_file.exists():
+        return strategy_file.read_text().strip()
+
+    # Fall back to generic
+    generic = strategies_dir / "generic.md"
+    return generic.read_text().strip()
 
 
 def build_user_message(

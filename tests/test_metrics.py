@@ -53,11 +53,32 @@ class TestExtractMetricFromOutput:
 Epoch 2 | val_auc=0.70
 Epoch 3 | val_auc=0.75"""
         result = extract_metric_from_output(output, "val_auc")
-        assert result == 0.75
+        assert result.value == 0.75
+        assert result.error is None
 
     def test_returns_none_when_missing(self):
         output = "Training complete. No metrics."
-        assert extract_metric_from_output(output, "val_auc") is None
+        result = extract_metric_from_output(output, "val_auc")
+        assert result.value is None
+        assert result.error is not None
+
+    def test_empty_output(self):
+        result = extract_metric_from_output("", "val_auc")
+        assert result.value is None
+        assert "empty" in result.error.lower()
+
+    def test_wrong_metric_name(self):
+        output = "loss=0.15 accuracy=0.92"
+        result = extract_metric_from_output(output, "val_auc")
+        assert result.value is None
+        assert "val_auc" in result.error
+        assert "accuracy" in result.error or "loss" in result.error
+
+    def test_no_metrics_at_all(self):
+        output = "Starting training...\nLoading data...\nDone."
+        result = extract_metric_from_output(output, "val_auc")
+        assert result.value is None
+        assert "No metrics found" in result.error
 
     def test_with_regex(self):
         output = """Step 100: mAP@0.5: 0.50
@@ -66,4 +87,4 @@ Step 300: mAP@0.5: 0.78"""
         result = extract_metric_from_output(
             output, "mAP@0.5", regex_pattern=r"mAP@0\.5:\s+([\d.]+)",
         )
-        assert result == 0.78
+        assert result.value == 0.78

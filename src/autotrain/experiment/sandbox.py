@@ -120,6 +120,16 @@ def _resolve_content(
         current = current_files[change.file]
         if change.search and change.search in current:
             return current.replace(change.search, change.replace or "", 1)
+        # Fallback: whitespace-normalized matching
+        if change.search:
+            result = _try_whitespace_match(current, change.search, change.replace or "")
+            if result is not None:
+                log.warning(
+                    "sandbox_whitespace_match",
+                    file=change.file,
+                    msg="Exact match failed but whitespace-normalized match succeeded",
+                )
+                return result
         return None
 
     return None
@@ -149,11 +159,50 @@ def _validate_diff(
     return errors
 
 
-def format_rejection_message(result: ValidationResult) -> str:
+def format_rejection_message(
+    result: ValidationResult,
+    current_files: dict[str, str] | None = None,
+) -> str:
     """Format a rejection message for the agent."""
     lines = ["Your proposed changes were REJECTED for safety reasons:"]
     for error in result.errors:
         lines.append(f"  - {error}")
+
+    # If search text not found, show actual file excerpt so agent can correct
+    if current_files:
+        for error in result.errors:
+            if "search text not found" in error:
+                # Extract filename from error: "File 'train.py': search text not found..."
+                for fname, content in current_files.items():
+                    if fname in error:
+                        excerpt = content[:500]
+                        lines.append("")
+                        lines.append(f"Current content of '{fname}' (first 500 chars):")
+                        lines.append(f"```\n{excerpt}\n```")
+                        break
+
     lines.append("")
     lines.append("Please propose different changes that comply with the rules.")
     return "\n".join(lines)
+
+
+def _try_whitespace_match(
+    content: str, search: str, replace: str,
+) -> str | None:
+    """Try whitespace-normalized matching as fallback.
+
+    Strips trailing whitespace from each line, then attempts the match.
+    Returns the modified content if match found, None otherwise.
+    """
+    # Normalize both content and search: strip trailing whitespace per line
+    def normalize(text: str) -> str:
+        return "\n".join(line.rstrip() for line in text.split("\n"))
+
+    norm_content = normalize(content)
+    norm_search = normalize(search)
+
+    if norm_search in norm_content:
+        # Apply replacement on normalized content, then return
+        return norm_content.replace(norm_search, replace, 1)
+
+    return None

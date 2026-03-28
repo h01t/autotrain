@@ -53,7 +53,7 @@ class BudgetConfig(BaseModel):
     time_seconds: int | None = None
     api_dollars: float | None = None
     max_iterations: int | None = None
-    experiment_timeout_seconds: int = 900  # 15 min default
+    experiment_timeout_seconds: int = 1800  # 30 min default
 
     @field_validator("time_seconds", mode="before")
     @classmethod
@@ -90,7 +90,6 @@ class ExecutionConfig(BaseModel):
     rsync_excludes: list[str] = Field(
         default_factory=lambda: [
             ".venv",
-            "data",
             "__pycache__",
             ".git",
             ".autotrain",
@@ -98,17 +97,23 @@ class ExecutionConfig(BaseModel):
             "*.pth",
             "*.ckpt",
             "*.onnx",
-            "outputs",
-            "runs",
+            "*.h5",
+            "*.safetensors",
         ]
     )
     checkpoint_patterns: list[str] = Field(
         default_factory=lambda: [
-            "outputs/training/*/weights/last.pt",
-            "outputs/training/*/weights/best.pt",
-            "**/checkpoint-*",
+            "**/weights/last.pt",               # YOLO
+            "**/weights/best.pt",               # YOLO
+            "**/checkpoint-*",                   # HuggingFace
+            "**/checkpoints/*.ckpt",            # Lightning
+            "**/*.h5",                           # Keras
+            "**/best_model*",                    # Generic
         ]
     )
+
+    # Dashboard URL for remote agent to push metrics to (e.g. ws://myhost:8000)
+    dashboard_url: str | None = None
 
     @model_validator(mode="after")
     def validate_ssh(self):
@@ -158,7 +163,7 @@ class WatchdogConfig(BaseModel):
     """Training watchdog configuration."""
 
     enabled: bool = True
-    check_interval_seconds: int = 30
+    check_interval_seconds: int = 5
     gpu_memory_min_mb: int = 100
     disk_space_min_gb: float = 1.0
     stdout_stagnation_minutes: int = 30
