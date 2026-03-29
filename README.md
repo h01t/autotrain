@@ -4,6 +4,8 @@ Autonomous ML training platform — train, evaluate, self-correct, repeat.
 
 Point AutoTrain at your ML project, set a target metric, and walk away. An LLM agent autonomously modifies your training script, runs experiments, tracks results via git, and self-corrects until the target is hit or the budget runs out.
 
+Works with **any ML framework** — YOLO, Hugging Face Transformers, Keras, Lightning, scikit-learn, and more. AutoTrain detects your framework and adapts its strategy automatically.
+
 ## Quick Start
 
 ```bash
@@ -26,16 +28,26 @@ autotrain run \
 
 ### Core
 - **Autonomous training loop** — LLM agent proposes hyperparameter changes, runs training, evaluates metrics, keeps or reverts
+- **Framework-agnostic** — auto-detects Ultralytics, Hugging Face, Keras, Lightning, scikit-learn, XGBoost, or generic PyTorch from imports; loads framework-specific tuning strategies
 - **Multi-provider LLM support** — Anthropic (Claude), DeepSeek (including deepseek-reasoner), Ollama (local models)
 - **Remote GPU execution** — SSH + rsync to remote machines, training survives SSH disconnects via nohup + process groups
 - **Git as experiment history** — every iteration is a commit, regressions are reverted automatically
 - **Crash recovery** — journaled state machine resumes from any failure point
-- **Code sandboxing** — file whitelist, dangerous pattern scanning, diff validation
+- **Code sandboxing** — file whitelist, dangerous pattern scanning, diff validation, whitespace-tolerant matching fallback
 - **Budget enforcement** — time, iteration, and API cost limits enforced both between and during training iterations
+- **Startup validation** — fails fast if train script or writable files are missing
 - **Structured logging** — JSON lines via structlog, queryable with jq
 
+### Error Handling
+- **Full output capture** — executor stores last 200 lines of training output in every result (not just streamed)
+- **Structured metric errors** — `MetricResult` reports exactly why extraction failed: empty output, wrong metric name, no metrics found
+- **Error feedback to agent** — crash errors stored in DB, shown in iteration history table, and passed to the agent as `last_error` on the next iteration so it can self-correct
+- **SCRIPT_ERROR outcome** — distinguishes non-zero exit codes from "ran fine but no metric found"
+
 ### Training Intelligence
-- **Per-epoch metric streaming** — captures loss, mAP, precision, recall per epoch as training runs (YOLO and Keras patterns supported)
+- **Framework detection** — scans imports in writable files to auto-detect ML framework (ultralytics, transformers, lightning, keras, sklearn, xgboost)
+- **Strategy modules** — per-framework tuning playbooks (learning rate, augmentation, scheduler advice tailored to YOLO vs HuggingFace vs Keras vs generic)
+- **Per-epoch metric streaming** — captures loss, mAP, precision, recall per epoch as training runs (YOLO, Keras, HuggingFace Trainer, Lightning, and generic `key=value` patterns)
 - **Training curve analysis** — agent receives formatted training curves with trend summaries to make informed decisions
 - **Checkpoint recovery** — detects checkpoints after crashes, resumes via `AUTOTRAIN_RESUME_FROM` env var instead of restarting from scratch
 
@@ -45,10 +57,10 @@ autotrain run \
 - **Remote metrics agent** — standalone pynvml-based daemon on GPU machine pushes metrics every 1s via WebSocket (~20ms latency vs 3-8s with SSH polling)
 - **Metric progress chart** — Recharts scatter plot color-coded by outcome (improved/regressed/crashed) with target + best reference lines
 - **Training curves** — per-epoch charts with loss/score split, multi-iteration overlay with iteration selector
-- **GPU resource monitoring** — 4 live metric cards (utilization, memory %, VRAM, temperature) + time-series chart, sub-second updates via remote agent
+- **GPU resource monitoring** — 4 live metric cards (utilization, memory %, VRAM, temperature) + time-series chart, sub-second updates via remote agent, capped at 300 points with downsampling for performance
 - **Iteration comparison** — two-iteration picker with metric/duration/cost deltas + epoch curve overlay
 - **Agent reasoning log** — expandable accordion with color-coded outcomes, hypothesis, reasoning, changes per iteration
-- **Iteration table** — sortable table with outcome badges, metric values, duration, cost
+- **Iteration table** — sortable table with outcome badges, metric values, duration, cost, error messages
 - **Multi-run support** — sidebar run selector with status markers
 - **Budget tracker** — progress bars for time, iterations, and API cost with per-iteration rates (parses budget limits from config)
 - **Versioned API** — `/api/v1/` prefix with 501 placeholders for Phase 2/3 features (experiment diffing, early stopping, file browser)
@@ -75,7 +87,7 @@ budget:
   time_seconds: 14400         # 4 hours
   max_iterations: 50
   api_dollars: 2.00
-  experiment_timeout_seconds: 900  # 15 min per training run
+  experiment_timeout_seconds: 1800  # 30 min per training run (default)
 
 execution:
   train_command: ".venv/bin/python train.py"
@@ -83,12 +95,10 @@ execution:
   ssh_host: my-gpu-box
   ssh_remote_dir: /home/user/project
   ssh_setup_command: "~/.local/bin/uv sync"  # runs once before first training
-  gpu_device: "0"
+  gpu_device: "0"              # optional — omit to let framework choose
   dashboard_url: "ws://192.168.1.14:8000"    # enables remote metrics agent
   rsync_excludes:              # protect remote-only dirs from --delete
     - ".venv"
-    - "data"
-    - "datasets"
     - "__pycache__"
     - ".git"
     - ".autotrain"
@@ -96,9 +106,8 @@ execution:
     - "*.pth"
     - "*.ckpt"
     - "*.onnx"
-    - "outputs"
-    - "runs"
-    - "artifacts"
+    - "*.h5"
+    - "*.safetensors"
 
 sandbox:
   writable_files:
@@ -160,9 +169,12 @@ autotrain monitor --repo .    # Legacy Streamlit dashboard
 autotrain run
     |
     v
+[Framework Detect] --> ultralytics / huggingface / keras / generic
+    |
+    v
 [Agent Loop] ---> [LLM Provider] (Claude / DeepSeek / Ollama)
     |                    |
-    |              propose changes
+    |              propose changes (framework-specific strategy)
     |                    |
     v                    v
 [Sandbox]          [Git Commit]
@@ -176,7 +188,8 @@ autotrain run
     v                    v
 [Evaluate] -----> improved? --> keep
     |              regressed? -> git revert
-    |              crashed? ---> checkpoint resume / retry
+    |              crashed? ---> error stored + fed to agent + checkpoint resume
+    |              script_error? -> exit code + output captured for agent
     v
 [Next Iteration] or [Done]
 ```
@@ -185,11 +198,11 @@ autotrain run
 
 | Subsystem | Purpose |
 |-----------|---------|
-| `agent/` | LLM client, prompt builder, response parser |
-| `config/` | YAML schema, defaults |
-| `core/` | Agent loop, state machine, budget tracker |
-| `execution/` | SSH + local executors, rsync, process management |
-| `experiment/` | Metric extraction, epoch parsing, git ops, sandbox |
+| `agent/` | LLM client, prompt builder, response parser, framework detector, strategy modules |
+| `config/` | YAML schema, defaults, cross-framework checkpoint patterns |
+| `core/` | Agent loop, state machine, budget tracker, startup validation |
+| `execution/` | SSH + local executors, rsync, process management, stdout capture |
+| `experiment/` | Metric extraction (MetricResult), epoch parsing (multi-framework), git ops, sandbox (fuzzy matching) |
 | `dashboard/` | React + FastAPI web dashboard (API, WebSocket, agent relay, SPA) |
 | `remote_agent/` | Standalone GPU metrics agent (pynvml, log tailing, WebSocket push) |
 | `monitor/` | Legacy Streamlit dashboard |
@@ -212,16 +225,31 @@ SQLite with WAL mode. Tables: `runs`, `iterations`, `metric_snapshots`, `epoch_m
 | Anthropic | claude-sonnet-4 | ~$0.02 | `ANTHROPIC_API_KEY` env var |
 | Ollama | any local model | Free | Ollama running locally |
 
+## Supported Frameworks
+
+AutoTrain auto-detects your ML framework from imports and loads tailored tuning strategies:
+
+| Framework | Detection | Strategy |
+|-----------|-----------|----------|
+| Ultralytics (YOLO) | `from ultralytics` | lr0, mosaic, imgsz, model size, cos_lr |
+| Hugging Face Transformers | `from transformers` | learning_rate, warmup, weight_decay, fp16/bf16, gradient accumulation |
+| Keras / TensorFlow | `from keras` / `import tensorflow` | optimizer, callbacks, dropout, augmentation |
+| PyTorch Lightning | `import lightning` | (uses generic strategy) |
+| scikit-learn | `from sklearn` | (uses generic strategy) |
+| XGBoost | `import xgboost` | (uses generic strategy) |
+| Generic | fallback | learning rate, batch size, epochs, regularization |
+
 ## Requirements
 
 - Python 3.12+
 - Git
 - SSH access to GPU machine (for remote execution)
-- On GPU machine: `websockets` + `pynvml` in project venv (for remote metrics agent)
+- `websockets` in project venv on GPU machine (auto-installed by remote agent)
+- Optional: `pynvml` on GPU machine (for GPU metrics — falls back to nvidia-smi)
 
 ## Status
 
-v0.3.0 — 6,189 lines Python + 1,346 lines TypeScript across 55 modules. 122 tests passing.
+v0.4.0 — 6,524 lines Python + 1,363 lines TypeScript across 56 modules. 125 tests passing.
 
 ## Future Improvements
 
