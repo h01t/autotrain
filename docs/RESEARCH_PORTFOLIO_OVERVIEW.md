@@ -11,22 +11,22 @@ AutoTrain is built upon a resilient, distributed architecture designed to separa
 ```mermaid
 graph TD
     subgraph Control Plane
-        UI[Web UI (React SPA)] <--> API[FastAPI Server]
-        API <--> DB[(SQLite Storage\nWAL Mode)]
-        Core[Agent Core\nState Machine] <--> DB
-        Core <--> Git[Git Versioning\nExperiment Tracking]
-        Core <--> LLM((LLM Provider\nClaude/DeepSeek))
+        UI["Web UI (React SPA)"] <--> API["FastAPI Server"]
+        API <--> DB[("SQLite Storage\nWAL Mode")]
+        Core["Agent Core\nState Machine"] <--> DB
+        Core <--> Git["Git Versioning\nExperiment Tracking"]
+        Core <--> LLM(("LLM Provider\nClaude/DeepSeek"))
     end
 
     subgraph Data Plane
-        Core -- SSH/Rsync --> Exec[Remote Executor]
+        Core -- SSH/Rsync --> Exec["Remote Executor"]
     end
 
     subgraph GPU Worker Node
-        Exec <--> Proc[Training Process\nsetsid/nohup]
-        Proc -- stdout tail --> Metrics[Metric Extractor]
+        Exec <--> Proc["Training Process\nsetsid/nohup"]
+        Proc -- stdout tail --> Metrics["Metric Extractor"]
         Metrics -- Parsed JSON --> Core
-        AgentDaemon[pynvml Daemon] -- WebSocket Push --> API
+        AgentDaemon["pynvml Daemon"] -- WebSocket Push --> API
     end
 ```
 
@@ -38,29 +38,29 @@ Safety and determinism are paramount when granting an LLM the capability to modi
 
 ```mermaid
 flowchart TD
-    Start((Iteration\nStart)) --> Context[Build Prompt Context\nMetrics & History]
-    Context --> LLM[LLM Multi-Provider]
+    Start(("Iteration\nStart")) --> Context["Build Prompt Context\nMetrics & History"]
+    Context --> LLM["LLM Multi-Provider"]
     
-    LLM -- JSON Output --> Parse[Parse Proposed Changes\nReasoning & Hypothesis]
+    LLM -- JSON Output --> Parse["Parse Proposed Changes\nReasoning & Hypothesis"]
     
     subgraph Sandbox Validation
-        Parse --> ValidWhitelist{Target File\nWhitelisted?}
-        ValidWhitelist -- No --> Reject[Reject & Inject\nError to Prompt]
-        ValidWhitelist -- Yes --> ValidDiff{Exact Match OR\nWhitespace Tolerant?}
+        Parse --> ValidWhitelist{"Target File\nWhitelisted?"}
+        ValidWhitelist -- No --> Reject["Reject & Inject\nError to Prompt"]
+        ValidWhitelist -- Yes --> ValidDiff{"Exact Match OR\nWhitespace Tolerant?"}
         ValidDiff -- No --> Reject
-        ValidDiff -- Yes --> Apply[Apply Diff\nIn-Memory]
+        ValidDiff -- Yes --> Apply["Apply Diff\nIn-Memory"]
     end
 
-    Apply --> Commit[Git Commit\nSnapshot Workspace]
-    Commit --> Rsync[Rsync Delta\nto GPU Node]
+    Apply --> Commit["Git Commit\nSnapshot Workspace"]
+    Commit --> Rsync["Rsync Delta\nto GPU Node"]
     
-    Rsync --> Execute[Spawn Training Process]
-    Execute --> Eval{Evaluate Target\nMetric Stream}
+    Rsync --> Execute["Spawn Training Process"]
+    Execute --> Eval{"Evaluate Target\nMetric Stream"}
     
-    Eval -- Regressed / Crashed --> Revert[Git Revert\nCapture Stacktrace]
-    Eval -- Improved --> UpdateBest[Update Best Status\nCheckpoint Weights]
+    Eval -- Regressed / Crashed --> Revert["Git Revert\nCapture Stacktrace"]
+    Eval -- Improved --> UpdateBest["Update Best Status\nCheckpoint Weights"]
     
-    Revert --> Next((Next Loop))
+    Revert --> Next(("Next Loop"))
     UpdateBest --> Next
 ```
 
