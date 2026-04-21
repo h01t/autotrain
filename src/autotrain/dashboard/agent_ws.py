@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
@@ -109,6 +109,6 @@ class AgentConnectionManager:
             "type": "log_line",
             "data": {
                 "line": data.get("line", ""),
-                "ts": data.get("ts", datetime.now(timezone.utc).isoformat()),
+                "ts": data.get("ts", datetime.now(UTC).isoformat()),
             },
         })

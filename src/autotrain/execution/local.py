@@ -143,7 +143,6 @@ class LocalExecutor:
 
     def detect_checkpoint(self, patterns: list[str]) -> str | None:
         """Find the most recent checkpoint file locally."""
-        import glob as _glob
 
         base = self._working_dir or Path(".")
         candidates: list[Path] = []

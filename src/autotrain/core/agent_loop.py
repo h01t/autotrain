@@ -25,7 +25,7 @@ from autotrain.experiment.git_ops import (
     init_repo,
     revert_last_commit,
 )
-from autotrain.experiment.metrics import MetricResult, extract_metric_from_output, parse_epoch_line
+from autotrain.experiment.metrics import extract_metric_from_output, parse_epoch_line
 from autotrain.experiment.sandbox import (
     FileChange,
     format_rejection_message,
@@ -475,7 +475,10 @@ class AgentLoop:
                 self._config.budget.time_seconds
                 and self._budget.elapsed_seconds >= self._config.budget.time_seconds
             ):
-                log.warning("time_budget_exceeded_mid_training", elapsed=f"{self._budget.elapsed_seconds:.0f}s")
+                log.warning(
+                    "time_budget_exceeded_mid_training",
+                    elapsed=f"{self._budget.elapsed_seconds:.0f}s"
+                )
                 self._executor.kill()
                 raise BudgetExhausted(
                     f"Time budget exhausted during training: {self._budget.elapsed_seconds:.0f}s "
@@ -587,14 +590,13 @@ class AgentLoop:
             return
 
         import subprocess as _sp
-        ssh_opts = self._executor._ssh_opts
         host = self._executor._host
         remote_script = f"{remote_dir}/.autotrain/standalone.py"
 
         try:
             # Copy script to remote
             _sp.run(
-                ["scp"] + ["-P", str(cfg.ssh_port)] + [str(agent_script), f"{host}:{remote_script}"],
+                ["scp", "-P", str(cfg.ssh_port), str(agent_script), f"{host}:{remote_script}"],
                 check=True, capture_output=True, timeout=15,
             )
 

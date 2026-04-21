@@ -17,9 +17,8 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-
 
 # ---------------------------------------------------------------------------
 # GPU collector
@@ -127,7 +126,7 @@ async def _gpu_loop(ws, interval: float):
             if gpus:
                 await ws.send(json.dumps({
                     "type": "gpu_metrics",
-                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "ts": datetime.now(UTC).isoformat(),
                     "gpus": gpus,
                 }))
         except Exception as e:
@@ -140,7 +139,7 @@ async def _log_loop(ws, log_path: Path):
         async for line in tail_file(log_path):
             await ws.send(json.dumps({
                 "type": "log_line",
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": datetime.now(UTC).isoformat(),
                 "line": line,
             }))
     except Exception as e:
@@ -154,7 +153,7 @@ async def _heartbeat_loop(ws):
         try:
             await ws.send(json.dumps({
                 "type": "heartbeat",
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": datetime.now(UTC).isoformat(),
                 "uptime_s": round(time.monotonic() - start),
             }))
         except Exception:
@@ -198,7 +197,8 @@ def main():
     p.add_argument("--log-path", default=None, help="Training log to tail")
     p.add_argument("--interval", type=float, default=1.0, help="GPU poll interval (seconds)")
     args = p.parse_args()
-    asyncio.run(run_agent(args.server, Path(args.log_path) if args.log_path else None, args.interval))
+    log_path = Path(args.log_path) if args.log_path else None
+    asyncio.run(run_agent(args.server, log_path, args.interval))
 
 
 if __name__ == "__main__":

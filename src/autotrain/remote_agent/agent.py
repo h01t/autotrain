@@ -15,7 +15,7 @@ import asyncio
 import json
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from autotrain.remote_agent.collector import collect_gpu_metrics
@@ -29,7 +29,7 @@ async def _gpu_loop(ws, interval: float) -> None:
             if gpus:
                 msg = json.dumps({
                     "type": "gpu_metrics",
-                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "ts": datetime.now(UTC).isoformat(),
                     "gpus": gpus,
                 })
                 await ws.send(msg)
@@ -46,7 +46,7 @@ async def _log_loop(ws, log_path: Path) -> None:
         async for line in tail_file(log_path):
             msg = json.dumps({
                 "type": "log_line",
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": datetime.now(UTC).isoformat(),
                 "line": line,
             })
             await ws.send(msg)
@@ -62,7 +62,7 @@ async def _heartbeat_loop(ws) -> None:
         try:
             msg = json.dumps({
                 "type": "heartbeat",
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": datetime.now(UTC).isoformat(),
                 "uptime_s": round(time.monotonic() - start),
             })
             await ws.send(msg)

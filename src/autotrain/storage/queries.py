@@ -261,7 +261,9 @@ def _row_to_iteration(row: sqlite3.Row) -> Iteration:
         api_cost=row["api_cost"],
         error_message=row["error_message"],
         checkpoint_path=row["checkpoint_path"] if "checkpoint_path" in keys else None,
-        resumed_from_checkpoint=bool(row["resumed_from_checkpoint"]) if "resumed_from_checkpoint" in keys else False,
+        resumed_from_checkpoint=bool(
+            row["resumed_from_checkpoint"]
+        ) if "resumed_from_checkpoint" in keys else False,
         created_at=datetime.fromisoformat(row["created_at"]),
     )
 
@@ -364,7 +366,8 @@ def record_gpu_snapshot(conn: sqlite3.Connection, snapshot: GpuSnapshot) -> None
     """Record a GPU metrics snapshot."""
     conn.execute(
         """INSERT INTO gpu_snapshots
-           (run_id, gpu_index, utilization_pct, memory_used_mb, memory_total_mb, temperature_c, timestamp)
+           (run_id, gpu_index, utilization_pct, memory_used_mb, memory_total_mb,
+            temperature_c, timestamp)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             snapshot.run_id,

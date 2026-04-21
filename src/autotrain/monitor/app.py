@@ -25,7 +25,6 @@ from autotrain.storage.queries import (
     get_epoch_metrics,
     get_gpu_snapshots,
     get_latest_gpu_snapshot,
-    get_latest_run,
     get_recent_iterations,
 )
 
@@ -400,7 +399,6 @@ def _render_iter_card(it) -> None:
     """Render a compact summary card for one iteration."""
     metric_str = f"{it.metric_value:.4f}" if it.metric_value is not None else "N/A"
     outcome_str = it.outcome.value if it.outcome else "?"
-    color = OUTCOME_COLORS.get(outcome_str, "#94a3b8")
     duration = f"{it.duration_seconds:.0f}s" if it.duration_seconds else "-"
 
     st.markdown(
@@ -453,7 +451,7 @@ def _render_agent_reasoning(conn, run_id, iterations) -> None:
                 st.markdown(f"**Hypothesis:** {it.agent_hypothesis}")
 
             if it.agent_reasoning:
-                st.markdown(f"**Reasoning:**")
+                st.markdown("**Reasoning:**")
                 st.text(it.agent_reasoning[:500])
 
             if it.changes_summary:
@@ -531,17 +529,20 @@ def _render_gpu_section(conn: sqlite3.Connection, run_id: str) -> None:
     # Current values
     if latest:
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("GPU Utilization", f"{latest.utilization_pct:.0f}%" if latest.utilization_pct is not None else "N/A")
+        util_str = f"{latest.utilization_pct:.0f}%" if latest.utilization_pct is not None else "N/A"
+        col1.metric("GPU Utilization", util_str)
 
         if latest.memory_used_mb is not None and latest.memory_total_mb:
             mem_pct = (latest.memory_used_mb / latest.memory_total_mb) * 100
-            col2.metric("Memory Used", f"{latest.memory_used_mb:.0f} / {latest.memory_total_mb:.0f} MB")
+            mem_str = f"{latest.memory_used_mb:.0f} / {latest.memory_total_mb:.0f} MB"
+            col2.metric("Memory Used", mem_str)
             col3.metric("Memory %", f"{mem_pct:.0f}%")
         else:
             col2.metric("Memory Used", "N/A")
             col3.metric("Memory %", "N/A")
 
-        col4.metric("Temperature", f"{latest.temperature_c:.0f}°C" if latest.temperature_c is not None else "N/A")
+        temp_str = f"{latest.temperature_c:.0f}°C" if latest.temperature_c is not None else "N/A"
+        col4.metric("Temperature", temp_str)
 
     # History chart
     if snapshots:

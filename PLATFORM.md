@@ -207,19 +207,17 @@ The key differentiator: **MLflow tracks what happened. AutoTrain decides what to
 
 ---
 
-## MVP Scope (v0.1)
+## Current Architecture Scope (v0.4.0)
 
-Start small, prove the concept:
+1. **CLI and Web Dashboard** — full terminal interaction plus a real-time SPA.
+2. **Framework Auto-detection** — supports Ultralytics, Hugging Face, Keras, etc.
+3. **Agent = Multi-Provider** — supports Claude API, DeepSeek, and local Ollama models.
+4. **Constraints**: Sandboxed execution, modifications restricted to whitelisted files, validation with search/replace fallback.
+5. **Metrics**: Real-time extraction with per-epoch streaming via stdout capture and parsing.
+6. **Git**: Local repo, automatic experiment branches, commits per iteration, automated reversion on regression.
+7. **Notification**: Print to terminal plus optional webhooks.
 
-1. **CLI tool** (not a web platform yet)
-2. **Single model, single GPU** (no distributed)
-3. **Agent = Claude via API** (not a custom model)
-4. **Constraints**: Agent can only modify `train.py` and `config.yaml`
-5. **Metrics**: Read from stdout/log file (no custom integrations)
-6. **Git**: Local repo, commit after each iteration
-7. **Notification**: Print to terminal + optional webhook
-
-### MVP File Structure
+### Codebase Structure
 
 ```
 autotrain/
@@ -239,7 +237,7 @@ autotrain/
 └── README.md
 ```
 
-### MVP Usage
+### Current Usage
 
 ```bash
 # Point at your ML project, set a target, go
@@ -261,7 +259,7 @@ autotrain compare HEAD~5 HEAD  # diff two experiments
 
 ---
 
-## Tech Stack (MVP)
+## Tech Stack
 
 | Component | Choice | Why |
 |-----------|--------|-----|
@@ -277,7 +275,6 @@ autotrain compare HEAD~5 HEAD  # diff two experiments
 
 ## Future Ideas (v1.0+)
 
-- **Web dashboard** with real-time training curves (React + FastAPI)
 - **Multi-GPU support** — distribute experiments across machines
 - **Model comparison UI** — side-by-side inference on test samples
 - **Dataset quality agent** — detect data issues before training
@@ -308,4 +305,4 @@ This vehicle detection project is a perfect **first test case** for the platform
 - Remote GPU available (blackbox, 3060 Ti)
 - Multiple knobs to tune (model size, augmentation, LR, epochs)
 
-Once the platform MVP exists, we could literally point it at this repo and say "get mAP to 0.85" and watch it work.
+Once the platform was built, we successfully pointed it at this repo and watched it push the mAP metric to the target within autonomous iterations.

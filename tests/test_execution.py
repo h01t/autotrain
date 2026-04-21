@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from autotrain.execution.local import LocalExecutor
@@ -24,7 +26,7 @@ class TestLocalExecutor:
         script = tmp_path / "test.py"
         script.write_text("for i in range(5): print(f'line {i}')\n")
 
-        lines = list(executor.execute(f"python {script}", timeout_seconds=10))
+        lines = list(executor.execute(f"{sys.executable} {script}", timeout_seconds=10))
         assert len(lines) == 5
         assert lines[0] == "line 0"
         assert lines[4] == "line 4"
@@ -41,7 +43,7 @@ class TestLocalExecutor:
         script.write_text("import time\nwhile True:\n    print('tick'); time.sleep(0.1)\n")
 
         lines = []
-        for line in executor.execute(f"python -u {script}", timeout_seconds=1):
+        for line in executor.execute(f"{sys.executable} -u {script}", timeout_seconds=1):
             lines.append(line)
 
         result = executor.get_result()
@@ -51,7 +53,7 @@ class TestLocalExecutor:
     def test_env_passed(self, tmp_path):
         executor = LocalExecutor(working_dir=tmp_path)
         lines = list(executor.execute(
-            "python -c \"import os; print(os.environ.get('TEST_VAR', 'missing'))\"",
+            f"{sys.executable} -c \"import os; print(os.environ.get('TEST_VAR', 'missing'))\"",
             timeout_seconds=10,
             env={"TEST_VAR": "hello"},
         ))
@@ -68,7 +70,7 @@ class TestLocalExecutor:
             "print('started', flush=True)\n"
             "time.sleep(30)\n"
         )
-        gen = executor.execute(f"python -u {script}", timeout_seconds=60)
+        gen = executor.execute(f"{sys.executable} -u {script}", timeout_seconds=60)
         # Read first line to ensure process is running
         first_line = next(gen)
         assert first_line == "started"
@@ -102,7 +104,7 @@ class TestLocalExecutor:
             '    print(json.dumps(metrics))\n'
         )
 
-        lines = list(executor.execute(f"python {script}", timeout_seconds=10))
+        lines = list(executor.execute(f"{sys.executable} {script}", timeout_seconds=10))
         assert len(lines) == 3
 
         # Verify we can parse metrics from the output

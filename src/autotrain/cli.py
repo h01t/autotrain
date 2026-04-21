@@ -103,7 +103,8 @@ def run(
 
     click.echo(f"AutoTrain v{__version__} starting")
     click.echo(f"  Repo: {repo_path}")
-    click.echo(f"  Target: {config.metric.name} {'>=' if config.metric.direction == 'maximize' else '<='} {config.metric.target}")
+    direction_symbol = '>=' if config.metric.direction == 'maximize' else '<='
+    click.echo(f"  Target: {config.metric.name} {direction_symbol} {config.metric.target}")
     click.echo(f"  Budget: {budget}")
     click.echo(f"  Logs: {log_file}")
     click.echo()
@@ -239,8 +240,8 @@ def dashboard(repo, port, host, no_browser):
     click.echo(f"  API docs: http://{browse_host}:{port}/docs")
 
     if not no_browser:
-        import webbrowser
         import threading
+        import webbrowser
         threading.Timer(1.0, lambda: webbrowser.open(f"http://{browse_host}:{port}")).start()
 
     try:

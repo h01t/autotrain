@@ -10,7 +10,6 @@ import structlog
 from fastapi import WebSocket, WebSocketDisconnect
 
 from autotrain.storage.queries import (
-    get_gpu_snapshots,
     get_latest_gpu_snapshot,
     get_recent_iterations,
     get_run,

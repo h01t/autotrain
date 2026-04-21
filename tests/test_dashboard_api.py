@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -236,8 +235,8 @@ def test_files_placeholder(client):
 
 def test_agent_ws_gpu_metrics(client, db_path):
     """Remote agent pushes GPU metrics via WebSocket and they land in the DB."""
-    import json
     import sqlite3 as _sqlite3
+
     from autotrain.storage.queries import get_gpu_snapshots
 
     with client.websocket_connect("/ws/agent/test-run") as ws:

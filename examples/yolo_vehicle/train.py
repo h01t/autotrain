@@ -45,7 +45,10 @@ def main():
     precision = metrics.get("metrics/precision(B)", 0.0)
     recall = metrics.get("metrics/recall(B)", 0.0)
 
-    print(f'{{"mAP": {map50:.4f}, "mAP50_95": {map50_95:.4f}, "precision": {precision:.4f}, "recall": {recall:.4f}}}')
+    print(
+        f'{{"mAP": {map50:.4f}, "mAP50_95": {map50_95:.4f}, '
+        f'"precision": {precision:.4f}, "recall": {recall:.4f}}}'
+    )
 
 
 if __name__ == "__main__":
