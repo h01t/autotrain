@@ -45,8 +45,8 @@ export function useGpuSnapshots(runId: string) {
     queryKey: ['gpu', runId],
     queryFn: () => fetchGpuSnapshots(runId),
     enabled: !!runId,
-    staleTime: 30000,         // WS pushes updates; only refetch if stale 30s+
-    refetchInterval: 30000,   // Fallback polling — WebSocket is primary
+    staleTime: 1000,          // Keep fallback refresh aligned with 1s GPU snapshots
+    refetchInterval: 1000,    // Fallback polling — WebSocket is still primary
   })
 }
 
@@ -56,7 +56,7 @@ export function useGpuLatest(runId: string) {
     queryFn: () => fetchGpuLatest(runId),
     enabled: !!runId,
     retry: false,
-    staleTime: 30000,
-    refetchInterval: 30000,
+    staleTime: 1000,
+    refetchInterval: 1000,
   })
 }

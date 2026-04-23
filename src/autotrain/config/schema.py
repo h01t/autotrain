@@ -163,7 +163,7 @@ class WatchdogConfig(BaseModel):
     """Training watchdog configuration."""
 
     enabled: bool = True
-    check_interval_seconds: int = 5
+    check_interval_seconds: int = 1
     gpu_memory_min_mb: int = 100
     disk_space_min_gb: float = 1.0
     stdout_stagnation_minutes: int = 30
