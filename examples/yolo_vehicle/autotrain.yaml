@@ -2,7 +2,7 @@
 
 agent:
   provider: deepseek
-  model: deepseek-reasoner
+  model: deepseek-v4-pro
   temperature: 0.3
   hard_timeout_seconds: 180
 

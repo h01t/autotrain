@@ -155,7 +155,7 @@ A single YAML file controls the entire run:
 ```yaml
 agent:
   provider: deepseek          # anthropic | deepseek | ollama
-  model: deepseek-chat
+  model: deepseek-v4-flash
   temperature: 0.3
 
 metric:

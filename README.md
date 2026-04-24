@@ -29,7 +29,7 @@ autotrain run \
 ### Core
 - **Autonomous training loop** — LLM agent proposes hyperparameter changes, runs training, evaluates metrics, keeps or reverts
 - **Framework-agnostic** — auto-detects Ultralytics, Hugging Face, Keras, Lightning, scikit-learn, XGBoost, or generic PyTorch from imports; loads framework-specific tuning strategies
-- **Multi-provider LLM support** — Anthropic (Claude), DeepSeek (including deepseek-reasoner), Ollama (local models)
+- **Multi-provider LLM support** — Anthropic (Claude), DeepSeek (including `deepseek-v4-pro` and `deepseek-v4-flash`), Ollama (local models)
 - **Remote GPU execution** — SSH + rsync to remote machines, training survives SSH disconnects via nohup + process groups
 - **Git as experiment history** — every iteration is a commit, regressions are reverted automatically
 - **Crash recovery** — journaled state machine resumes from any failure point
@@ -76,7 +76,7 @@ Place `autotrain.yaml` in the project root — it's auto-detected. Or pass `--co
 # autotrain.yaml
 agent:
   provider: deepseek          # anthropic | deepseek | ollama
-  model: deepseek-reasoner    # or deepseek-chat, claude-sonnet-4, etc.
+  model: deepseek-v4-pro      # or deepseek-v4-flash, claude-sonnet-4, etc.
 
 metric:
   name: mAP
@@ -127,7 +127,7 @@ autotrain run --repo ./my-project -v
 autotrain run \
     --repo ./my-project \
     --provider deepseek \
-    --model deepseek-reasoner \
+    --model deepseek-v4-pro \
     --metric mAP --target 0.90 \
     --train-command ".venv/bin/python train.py" \
     --ssh-host my-gpu-box \
@@ -219,8 +219,8 @@ SQLite with WAL mode. Tables: `runs`, `iterations`, `metric_snapshots`, `epoch_m
 
 | Provider | Model | Cost/iter | Setup |
 |----------|-------|-----------|-------|
-| DeepSeek | deepseek-reasoner | ~$0.002 | `DEEPSEEK_API_KEY` env var |
-| DeepSeek | deepseek-chat | ~$0.001 | `DEEPSEEK_API_KEY` env var |
+| DeepSeek | deepseek-v4-pro | ~$0.016 | `DEEPSEEK_API_KEY` env var |
+| DeepSeek | deepseek-v4-flash | ~$0.001 | `DEEPSEEK_API_KEY` env var |
 | Anthropic | claude-haiku-4-5 | ~$0.003 | `ANTHROPIC_API_KEY` env var |
 | Anthropic | claude-sonnet-4 | ~$0.02 | `ANTHROPIC_API_KEY` env var |
 | Ollama | any local model | Free | Ollama running locally |

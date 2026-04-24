@@ -100,7 +100,7 @@ When `autotrain run` is started, the following sequence executes:
 
 **Process Isolation.** Training runs in a `setsid` process group on the remote machine. If SSH drops (laptop sleeps, network hiccup), training continues. AutoTrain reconnects and resumes tailing output.
 
-**Multi-Provider LLM.** Supports Anthropic (Claude), DeepSeek (including deepseek-reasoner), and Ollama. DeepSeek Reasoner provides strong reasoning capabilities at ~$0.002/iteration.
+**Multi-Provider LLM.** Supports Anthropic (Claude), DeepSeek (including `deepseek-v4-pro` and `deepseek-v4-flash`), and Ollama. `deepseek-v4-pro` is the stronger reasoning-oriented option, while `deepseek-v4-flash` is the faster lower-cost option.
 
 **Budget Enforcement.** Hard limits on wall-clock time, iteration count, and API spend. Budget is checked both between iterations and mid-training — a single run cannot exceed the total time budget.
 
@@ -166,7 +166,7 @@ A single YAML file controls the entire run:
 ```yaml
 agent:
   provider: deepseek          # anthropic | deepseek | ollama
-  model: deepseek-reasoner    # deepseek-chat, claude-sonnet-4, etc.
+  model: deepseek-v4-pro      # deepseek-v4-flash, claude-sonnet-4, etc.
   temperature: 0.3
   hard_timeout_seconds: 180
 

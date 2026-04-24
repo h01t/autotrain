@@ -17,8 +17,8 @@ _COST_RATES: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-6-20250819": (3.00, 15.00),
     "claude-opus-4-20250514": (15.00, 75.00),
     "claude-opus-4-6-20250819": (15.00, 75.00),
-    "deepseek-chat": (0.27, 1.10),
-    "deepseek-reasoner": (0.55, 2.19),
+    "deepseek-v4-flash": (0.14, 0.28),
+    "deepseek-v4-pro": (1.74, 3.48),
 }
 _DEFAULT_RATE = (3.00, 15.00)
 
