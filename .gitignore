@@ -27,3 +27,5 @@ venv/
 .pytest_cache/
 htmlcov/
 .coverage
+docs/project-overview.pdf
+docs/project-overview.html

@@ -2,6 +2,25 @@
   "name": "autotrain-dashboard",
   "private": true,
   "version": "0.1.0",
+  "description": "React dashboard for AutoTrain, an autonomous ML training platform for LLM-guided experiment loops.",
+  "license": "MIT",
+  "homepage": "https://github.com/h01t/autorun#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/h01t/autorun.git",
+    "directory": "src/autotrain/dashboard/frontend"
+  },
+  "bugs": {
+    "url": "https://github.com/h01t/autorun/issues"
+  },
+  "keywords": [
+    "autotrain",
+    "dashboard",
+    "machine-learning",
+    "mlops",
+    "react",
+    "fastapi"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",

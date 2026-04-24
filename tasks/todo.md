@@ -1,11 +1,14 @@
-- [x] Read project README and AGENTS instructions to understand the SSH dependency for remote training.
-- [x] Inspect local SSH client configuration for `blackbox` and identify why public key auth is not succeeding.
-- [x] Apply the minimal fix needed for key-based login on the Mac and `blackbox`.
-- [ ] Verify that `ssh blackbox` works without prompting for a remote password and record the result below.
+- [x] Audit the current public-facing repo state: README, overview docs, metadata, license, and tests.
+- [x] Add missing public-release artifacts and metadata polish (`LICENSE`, `pyproject.toml`, frontend `package.json`).
+- [x] Rewrite `README.md` for a cleaner research-first public presentation with Mermaid diagrams and docs links.
+- [x] Create canonical `docs/project-overview.md` with title page, diagrams, appendix, and Pandoc export guidance.
+- [x] Retire duplicate overview artifacts and keep one authoritative long-form narrative in the repo.
+- [x] Run verification: tests, doc link checks, and a Pandoc dry-run.
 
 ## Review
 
-- `blackbox` already accepts the Mac's ED25519 public key (`SHA256:QkF/XO/TFdMhr2D2vytm6W66PGzmbbk1QzhffNRyUS0`).
-- The failure mode is local: the private key is passphrase-protected and was not loaded into the ssh-agent / macOS Keychain.
-- Updated `/Users/grmim/.ssh/config` for `blackbox` with `AddKeysToAgent yes`, `UseKeychain yes`, and `IdentitiesOnly yes`.
-- `ssh-add --apple-load-keychain` reported `No identity found in the keychain`, so one interactive passphrase entry is still required to store the key.
+- Added a top-level MIT `LICENSE` and polished package metadata for the Python package and frontend dashboard.
+- Replaced the previous public README with a shorter research-first version that uses Mermaid diagrams and points to one canonical overview document.
+- Created `docs/project-overview.md` as the single long-form narrative with title page, architecture/flow diagrams, appendix material, and export guidance.
+- Retired duplicate overview artifacts from `docs/` and the repo root so the public surface has one authoritative project overview.
+- Verification: `125` tests passed, README/project overview links resolve, Pandoc HTML export succeeded, and PDF export is source-ready but locally blocked by missing `pdflatex`.
