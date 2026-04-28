@@ -29,8 +29,8 @@ def create_run(conn: sqlite3.Connection, run: Run) -> None:
     conn.execute(
         """INSERT INTO runs (id, repo_path, metric_name, metric_target, metric_direction,
            status, best_metric_value, best_iteration, total_iterations, total_api_cost,
-           git_branch, config_snapshot, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           git_branch, config_snapshot, resumed_from_run_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             run.id,
             run.repo_path,
@@ -44,6 +44,7 @@ def create_run(conn: sqlite3.Connection, run: Run) -> None:
             run.total_api_cost,
             run.git_branch,
             run.config_snapshot,
+            run.resumed_from_run_id,
             run.created_at.isoformat(),
             run.updated_at.isoformat(),
         ),
@@ -69,6 +70,10 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> Run | None:
         total_api_cost=row["total_api_cost"],
         git_branch=row["git_branch"],
         config_snapshot=row["config_snapshot"],
+        resumed_from_run_id=(
+            row["resumed_from_run_id"]
+            if "resumed_from_run_id" in row.keys() else None
+        ),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
@@ -93,6 +98,10 @@ def get_all_runs(conn: sqlite3.Connection) -> list[Run]:
             total_api_cost=row["total_api_cost"],
             git_branch=row["git_branch"],
             config_snapshot=row["config_snapshot"],
+            resumed_from_run_id=(
+            row["resumed_from_run_id"]
+            if "resumed_from_run_id" in row.keys() else None
+        ),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )

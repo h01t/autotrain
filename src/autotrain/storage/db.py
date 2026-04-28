@@ -9,7 +9,7 @@ import structlog
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS runs (
     total_api_cost REAL NOT NULL DEFAULT 0.0,
     git_branch TEXT,
     config_snapshot TEXT,
+    resumed_from_run_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -128,6 +129,10 @@ CREATE TABLE IF NOT EXISTS gpu_snapshots (
 CREATE INDEX IF NOT EXISTS idx_gpu_snapshots_run ON gpu_snapshots(run_id, timestamp);
 """
 
+MIGRATION_V5 = """
+ALTER TABLE runs ADD COLUMN resumed_from_run_id TEXT;
+"""
+
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """Open a SQLite connection with WAL mode and foreign keys enabled."""
@@ -165,6 +170,8 @@ def init_db(db_path: Path) -> sqlite3.Connection:
                 conn.executescript(MIGRATION_V3)
             if current < 4:
                 conn.executescript(MIGRATION_V4)
+            if current < 5:
+                conn.executescript(MIGRATION_V5)
             conn.execute(
                 "UPDATE schema_version SET version = ?", (SCHEMA_VERSION,)
             )

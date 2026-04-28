@@ -239,25 +239,25 @@ def test_create_run_valid(client, tmp_path: Path):
 
 
 def test_create_run_invalid_yaml(client):
-    """Creating a run with invalid YAML should return errors."""
+    """Creating a run with invalid YAML should return 400."""
     resp = client.post("/api/v1/runs", json={
         "config_yaml": "not: valid: yaml: :::",
         "start_immediately": False,
     })
-    assert resp.status_code == 201  # 201 even on error — response body has details
-    data = resp.json()
+    assert resp.status_code == 400
+    data = resp.json()["detail"]
     assert data["status"] == "invalid_config"
     assert len(data["config_errors"]) >= 1
 
 
 def test_create_run_missing_repo_path(client):
-    """Creating a run without repo_path should fail."""
+    """Creating a run without repo_path should return 400."""
     resp = client.post("/api/v1/runs", json={
         "config_yaml": "metric:\n  name: loss\n  target: 0.5",
         "start_immediately": False,
     })
-    assert resp.status_code == 201
-    data = resp.json()
+    assert resp.status_code == 400
+    data = resp.json()["detail"]
     assert data["status"] == "invalid_config"
 
 
@@ -505,3 +505,486 @@ def test_run_action_response_structure(client, tmp_path: Path):
     assert "message" in data
     assert "previous_status" in data
     assert "new_status" in data
+
+
+# ============================================================================
+# Milestone #2 revisions — new tests
+# ============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Same-repo active-run guard (409 Conflict)
+# ---------------------------------------------------------------------------
+
+
+def test_create_run_conflict_same_repo(client, tmp_path: Path):
+    """Creating a run on a repo with an active run should return 409."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    resp1 = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": True,
+    })
+    assert resp1.status_code == 201
+    run1_id = resp1.json()["run_id"]
+
+    resp2 = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": True,
+    })
+    assert resp2.status_code == 409
+    detail = resp2.json()["detail"]
+    assert detail["status"] == "conflict"
+    assert run1_id in detail["message"]
+
+
+# ---------------------------------------------------------------------------
+# Stop preserves terminal status
+# ---------------------------------------------------------------------------
+
+
+def test_stop_preserves_terminal_status(client, tmp_path: Path):
+    """Stopping a FAILED run should not change its status."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    run_id = resp.json()["run_id"]
+
+    # Manually set to FAILED via DB
+    import sqlite3
+
+    from autotrain.storage.models import RunStatus
+    from autotrain.storage.queries import update_run_status as _update_status
+    db_file = tmp_path / ".autotrain" / "state.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.row_factory = sqlite3.Row
+    _update_status(conn, run_id, RunStatus.FAILED)
+    conn.close()
+
+    resp2 = client.post(f"/api/v1/runs/{run_id}/stop")
+    assert resp2.status_code == 200
+    data = resp2.json()
+    assert data["success"] is True
+    assert data["new_status"] == "failed"
+    assert "terminal state" in data["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Resume endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_resume_creates_new_run(client, tmp_path: Path):
+    """Resume should create a new run record linked to prior run."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    run_id = resp.json()["run_id"]
+
+    resp2 = client.post(f"/api/v1/runs/{run_id}/resume", json={
+        "run_id": run_id,
+        "start_immediately": False,
+    })
+    assert resp2.status_code == 201
+    data = resp2.json()
+    assert data["new_run_id"]
+    assert data["new_run_id"] != run_id
+    assert data["prior_run_id"] == run_id
+    assert data["status"] == "stopped"
+
+
+def test_resume_nonexistent_run(client):
+    """Resuming a nonexistent run should return 404."""
+    resp = client.post("/api/v1/runs/nonexistent/resume", json={
+        "run_id": "nonexistent",
+        "start_immediately": False,
+    })
+    assert resp.status_code == 404
+
+
+def test_resume_persists_link(client, tmp_path: Path):
+    """Resumed run should store resumed_from_run_id in DB."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    run_id = resp.json()["run_id"]
+
+    resp2 = client.post(f"/api/v1/runs/{run_id}/resume", json={
+        "run_id": run_id,
+        "start_immediately": False,
+    })
+    new_run_id = resp2.json()["new_run_id"]
+
+    resp3 = client.get(f"/api/v1/runs/{new_run_id}")
+    assert resp3.status_code == 200
+    data = resp3.json()
+    assert data["resumed_from_run_id"] == run_id
+
+
+# ---------------------------------------------------------------------------
+# Config endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_get_run_config(client, tmp_path: Path):
+    """GET /runs/{run_id}/config should return config as YAML and JSON."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    run_id = resp.json()["run_id"]
+
+    resp2 = client.get(f"/api/v1/runs/{run_id}/config")
+    assert resp2.status_code == 200
+    data = resp2.json()
+    assert data["run_id"] == run_id
+    assert data["config_yaml"] is not None
+    assert data["config_json"] is not None
+    assert data["config_json"]["repo_path"] == str(repo)
+
+
+def test_config_not_found(client):
+    """Config for nonexistent run should 404."""
+    resp = client.get("/api/v1/runs/nonexistent/config")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Logs endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_get_run_logs(client, tmp_path: Path):
+    """GET /runs/{run_id}/logs should return log lines."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+    log_dir = repo / ".autotrain"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "train_output.log").write_text("epoch 1\nepoch 2\nepoch 3\n")
+
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    run_id = resp.json()["run_id"]
+
+    resp2 = client.get(f"/api/v1/runs/{run_id}/logs")
+    assert resp2.status_code == 200
+    data = resp2.json()
+    assert data["run_id"] == run_id
+    assert len(data["lines"]) == 3
+    assert data["total_lines"] == 3
+    assert data["truncated"] is False
+
+
+def test_get_run_logs_empty(client, tmp_path: Path):
+    """Logs for run without log file should return empty."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    run_id = resp.json()["run_id"]
+
+    resp2 = client.get(f"/api/v1/runs/{run_id}/logs")
+    assert resp2.status_code == 200
+    data = resp2.json()
+    assert data["lines"] == []
+
+
+def test_get_logs_truncated(client, tmp_path: Path):
+    """Logs should be truncated when exceeding tail limit."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+    log_dir = repo / ".autotrain"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "train_output.log").write_text(
+        "\n".join(f"line {i}" for i in range(300))
+    )
+
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    run_id = resp.json()["run_id"]
+
+    resp2 = client.get(f"/api/v1/runs/{run_id}/logs?tail=50")
+    assert resp2.status_code == 200
+    data = resp2.json()
+    assert len(data["lines"]) == 50
+    assert data["total_lines"] == 300
+    assert data["truncated"] is True
+
+
+# ---------------------------------------------------------------------------
+# Artifacts endpoint (safety-hardened)
+# ---------------------------------------------------------------------------
+
+
+def test_list_artifacts_empty(client, tmp_path: Path):
+    """GET /runs/{run_id}/artifacts with no artifacts should return empty."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    run_id = resp.json()["run_id"]
+
+    resp2 = client.get(f"/api/v1/runs/{run_id}/artifacts")
+    assert resp2.status_code == 200
+    data = resp2.json()
+    assert data["artifacts"] == []
+
+
+def test_list_artifacts_with_files(client, tmp_path: Path):
+    """Artifacts endpoint should list artifact files."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    run_id = resp.json()["run_id"]
+
+    artifacts_dir = repo / ".autotrain" / "artifacts" / run_id
+    artifacts_dir.mkdir(parents=True)
+    (artifacts_dir / "model.pt").write_text("checkpoint data")
+    (artifacts_dir / "config.yaml").write_text("lr: 0.001")
+
+    resp2 = client.get(f"/api/v1/runs/{run_id}/artifacts")
+    assert resp2.status_code == 200
+    data = resp2.json()
+    assert len(data["artifacts"]) == 2
+    names = {a["name"] for a in data["artifacts"]}
+    assert names == {"model.pt", "config.yaml"}
+
+
+def test_download_artifact(client, tmp_path: Path):
+    """Download should serve an artifact file."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    run_id = resp.json()["run_id"]
+
+    artifacts_dir = repo / ".autotrain" / "artifacts" / run_id
+    artifacts_dir.mkdir(parents=True)
+    (artifacts_dir / "model.pt").write_text("checkpoint data")
+
+    resp2 = client.get(f"/api/v1/runs/{run_id}/artifacts/model.pt")
+    assert resp2.status_code == 200
+    assert resp2.text == "checkpoint data"
+
+
+def test_artifact_path_traversal_blocked(client, tmp_path: Path):
+    """Path traversal in artifact download should be blocked (403).
+
+    Uses URL-encoded '..' which bypasses Starlette's path normalization
+    and reaches our handler with literal traversal segments.
+    """
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    run_id = resp.json()["run_id"]
+
+    resp2 = client.get(
+        f"/api/v1/runs/{run_id}/artifacts/%2e%2e/%2e%2e/%2e%2e/etc/passwd"
+    )
+    assert resp2.status_code == 403, f"Got {resp2.status_code}: {resp2.text}"
+
+
+# ---------------------------------------------------------------------------
+# Defaults endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_get_defaults(client):
+    """GET /defaults should return a YAML template."""
+    resp = client.get("/api/v1/defaults")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["config_yaml"]
+    assert "repo_path:" in data["config_yaml"]
+    assert "metric:" in data["config_yaml"]
+
+
+# ---------------------------------------------------------------------------
+# Save config endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_save_config(client, tmp_path: Path):
+    """POST /save-config should write autotrain.yaml to repo."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+
+    resp = client.post("/api/v1/save-config", json={
+        "repo_path": str(repo),
+        "config_yaml": _yaml_config(str(repo)),
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert (repo / "autotrain.yaml").exists()
+    assert "val_loss" in (repo / "autotrain.yaml").read_text()
+
+
+def test_save_config_bad_yaml(client, tmp_path: Path):
+    """Invalid YAML should be rejected."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+
+    resp = client.post("/api/v1/save-config", json={
+        "repo_path": str(repo),
+        "config_yaml": "{{{ bad yaml",
+    })
+    assert resp.status_code == 400
+
+
+def test_save_config_nonexistent_repo(client):
+    """Nonexistent repo should be rejected."""
+    resp = client.post("/api/v1/save-config", json={
+        "repo_path": "/nonexistent/repo",
+        "config_yaml": "metric:\n  name: loss",
+    })
+    assert resp.status_code == 400
+
+
+def test_save_config_schema_validation(client, tmp_path: Path):
+    """Config with missing required fields should fail schema validation."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+
+    resp = client.post("/api/v1/save-config", json={
+        "repo_path": str(repo),
+        "config_yaml": f"repo_path: {repo}\nmetric:\n  name: loss\n",
+    })
+    # Valid config with metric name but missing target should fail
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Same-repo conflict guarding for start and resume
+# ---------------------------------------------------------------------------
+
+
+def test_start_conflict_same_repo(client, tmp_path: Path):
+    """Starting a run on a repo with another active run should return 409."""
+    repo1 = tmp_path / "test-repo"
+    repo1.mkdir()
+    (repo1 / "train.py").write_text("print('train1')")
+
+    # Create and start run on repo1
+    resp1 = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo1)),
+        "start_immediately": True,
+    })
+    assert resp1.status_code == 201
+
+    # Create a stopped run also on repo1 (should succeed — guard only fires on start)
+    resp2 = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo1)),
+        "start_immediately": False,
+    })
+    assert resp2.status_code == 201, f"Got {resp2.status_code}: {resp2.json()}"
+    run2_id = resp2.json()["run_id"]
+
+    # Try to start run2 — should be blocked because run1 is active on same repo
+    resp3 = client.post(f"/api/v1/runs/{run2_id}/start")
+    assert resp3.status_code == 409, f"Got {resp3.status_code}: {resp3.json()}"
+    detail = resp3.json()["detail"]
+    assert "already active" in detail["message"].lower()
+
+
+def test_resume_conflict_same_repo(client, tmp_path: Path):
+    """Resuming a run on a repo with another active run should return 409."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    # Create and start a run
+    resp1 = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": True,
+    })
+    assert resp1.status_code == 201
+    run1_id = resp1.json()["run_id"]
+
+    # Try to resume another run on same repo (the resume itself creates
+    # a new run and try to start it on the same repo)
+    resp2 = client.post(f"/api/v1/runs/{run1_id}/resume", json={
+        "run_id": run1_id,
+        "start_immediately": True,
+    })
+    assert resp2.status_code == 409, f"Got {resp2.status_code}: {resp2.json()}"
+
+
+# ---------------------------------------------------------------------------
+# Duplicate run row prevention
+# ---------------------------------------------------------------------------
+
+
+def test_no_duplicate_run_rows(client, tmp_path: Path):
+    """AgentLoop must not create a second run record when created via dashboard."""
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("print('train')")
+
+    # Create via dashboard (should create exactly 1 row)
+    resp = client.post("/api/v1/runs", json={
+        "config_yaml": _yaml_config(str(repo)),
+        "start_immediately": False,
+    })
+    assert resp.status_code == 201
+    run_id = resp.json()["run_id"]
+
+    # Query the DB directly to count rows
+    import sqlite3
+    db_file = tmp_path / ".autotrain" / "state.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT COUNT(*) as cnt FROM runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    conn.close()
+    assert rows["cnt"] == 1, f"Expected 1 row for run_id={run_id}, got {rows['cnt']}"

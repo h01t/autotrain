@@ -34,6 +34,7 @@ def serialize_run(run: Run) -> dict:
         "total_api_cost": run.total_api_cost,
         "git_branch": run.git_branch,
         "config_snapshot": run.config_snapshot,
+        "resumed_from_run_id": run.resumed_from_run_id,
         "created_at": _dt(run.created_at),
         "updated_at": _dt(run.updated_at),
     }

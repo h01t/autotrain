@@ -9,13 +9,17 @@ import { AgentReasoning } from '../components/dashboard/AgentReasoning'
 import { IterationComparison } from '../components/dashboard/IterationComparison'
 import { BudgetTracker } from '../components/dashboard/BudgetTracker'
 import { GpuResources } from '../components/dashboard/GpuResources'
+import { LogsPanel } from '../components/dashboard/LogsPanel'
+import { ArtifactsPanel } from '../components/dashboard/ArtifactsPanel'
+import { ConfigDrawer } from '../components/dashboard/ConfigDrawer'
 
 interface RunDashboardProps {
   runId: string
   onRefresh?: () => void
+  onRunCreated?: (runId: string) => void
 }
 
-export function RunDashboard({ runId, onRefresh }: RunDashboardProps) {
+export function RunDashboard({ runId, onRefresh, onRunCreated }: RunDashboardProps) {
   useWebSocket(runId)
 
   const { data: run, isLoading: runLoading } = useRun(runId)
@@ -35,7 +39,7 @@ export function RunDashboard({ runId, onRefresh }: RunDashboardProps) {
 
   return (
     <div className="flex-1 overflow-y-auto p-6">
-      <Header run={run} onRefresh={onRefresh} />
+      <Header run={run} onRefresh={onRefresh} onRunCreated={onRunCreated} />
       <MetricCards run={run} />
       <MetricProgressChart run={run} snapshots={snaps} iterations={iters} />
       <TrainingCurves runId={runId} iterations={iters} />
@@ -44,6 +48,13 @@ export function RunDashboard({ runId, onRefresh }: RunDashboardProps) {
       <IterationComparison runId={runId} iterations={iters} />
       <BudgetTracker run={run} iterations={iters} />
       <GpuResources runId={runId} />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <LogsPanel runId={runId} />
+        <ArtifactsPanel runId={runId} />
+      </div>
+      <div className="flex justify-end">
+        <ConfigDrawer runId={runId} />
+      </div>
     </div>
   )
 }

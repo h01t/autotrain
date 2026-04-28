@@ -1,4 +1,5 @@
 export interface Run {
+  
   id: string
   repo_path: string
   metric_name: string
@@ -11,6 +12,7 @@ export interface Run {
   total_api_cost: number
   git_branch: string | null
   config_snapshot: string | null
+  resumed_from_run_id: string | null
   created_at: string | null
   updated_at: string | null
 }
@@ -147,4 +149,50 @@ export interface RunStatusResponse {
   is_active: boolean
   pid: number | null
   uptime_seconds: number | null
+}
+
+// -- New types for Milestone #2 revisions --
+
+export interface ResumeRunResponse {
+  new_run_id: string
+  prior_run_id: string
+  status: string
+  message: string
+  resumed_from_checkpoint: boolean
+}
+
+export interface RunConfigResponse {
+  run_id: string
+  config_yaml: string | null
+  config_json: Record<string, unknown> | null
+}
+
+export interface RunLogsResponse {
+  run_id: string
+  lines: string[]
+  total_lines: number
+  truncated: boolean
+}
+
+export interface ArtifactInfo {
+  name: string
+  path: string
+  size_bytes: number
+  modified: string | null
+}
+
+export interface ArtifactsListResponse {
+  run_id: string
+  artifacts: ArtifactInfo[]
+  total_bytes: number
+}
+
+export interface DefaultsResponse {
+  config_yaml: string
+}
+
+export interface SaveConfigResponse {
+  success: boolean
+  path: string
+  message: string
 }

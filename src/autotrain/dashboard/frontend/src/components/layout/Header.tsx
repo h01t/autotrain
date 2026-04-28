@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import type { Run } from '../../api/types'
-import { startRun, stopRun, restartRun } from '../../api/client'
+import { startRun, stopRun, restartRun, resumeRun } from '../../api/client'
 
 const STATUS_STYLES: Record<string, string> = {
   running: 'bg-green-900/50 text-green-400 border-green-700',
@@ -13,19 +13,28 @@ const STATUS_STYLES: Record<string, string> = {
 interface HeaderProps {
   run: Run
   onRefresh?: () => void
+  onRunCreated?: (runId: string) => void
 }
 
-export function Header({ run, onRefresh }: HeaderProps) {
+export function Header({ run, onRefresh, onRunCreated }: HeaderProps) {
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
-  const handleAction = useCallback(async (action: 'start' | 'stop' | 'restart') => {
+  const handleAction = useCallback(async (action: 'start' | 'stop' | 'restart' | 'resume') => {
     setActionLoading(action)
     setActionError(null)
     try {
       if (action === 'start') await startRun(run.id)
       else if (action === 'stop') await stopRun(run.id)
-      else await restartRun(run.id)
+      else if (action === 'restart') await restartRun(run.id)
+      else if (action === 'resume') {
+        const result = await resumeRun(run.id, true)
+        if (result.new_run_id) {
+          onRefresh?.()
+          onRunCreated?.(result.new_run_id)
+          return
+        }
+      }
       onRefresh?.()
     } catch (e) {
       setActionError(String(e))
@@ -76,6 +85,16 @@ export function Header({ run, onRefresh }: HeaderProps) {
               className="px-3 py-1 rounded text-xs font-medium bg-yellow-700 hover:bg-yellow-600 disabled:bg-gray-700 disabled:text-gray-500 text-white transition-colors"
             >
               {actionLoading === 'restart' ? '...' : '↻ Restart'}
+            </button>
+          )}
+          {(run.status === 'failed' || run.status === 'completed' ||
+            run.status === 'stopped' || run.status === 'budget_exhausted') && (
+            <button
+              onClick={() => handleAction('resume')}
+              disabled={actionLoading !== null}
+              className="px-3 py-1 rounded text-xs font-medium bg-purple-700 hover:bg-purple-600 disabled:bg-gray-700 disabled:text-gray-500 text-white transition-colors"
+            >
+              {actionLoading === 'resume' ? '...' : '↺ Resume'}
             </button>
           )}
         </div>

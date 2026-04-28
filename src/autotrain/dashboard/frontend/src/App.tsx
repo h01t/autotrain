@@ -56,7 +56,7 @@ export default function App() {
         {isLoading ? (
           <LoadingSkeleton />
         ) : selectedRunId ? (
-          <RunDashboard runId={selectedRunId} onRefresh={refetch} />
+          <RunDashboard runId={selectedRunId} onRefresh={refetch} onRunCreated={handleRunCreated} />
         ) : (
           <div className="flex flex-col items-center justify-center flex-1 gap-4">
             <p className="text-gray-600 text-lg">No runs found. Start a training run to see data here.</p>

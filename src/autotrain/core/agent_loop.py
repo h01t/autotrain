@@ -94,9 +94,10 @@ log = structlog.get_logger()
 class AgentLoop:
     """The main orchestration loop for autonomous training."""
 
-    def __init__(self, config: RunConfig) -> None:
+    def __init__(self, config: RunConfig, run_id: str | None = None) -> None:
         self._config = config
-        self._run_id = str(uuid.uuid4())[:8]
+        self._run_id = run_id or str(uuid.uuid4())[:8]
+        self._record_pre_created = run_id is not None  # Pre-created by RunManager
         self._repo = config.repo_path
 
         # Initialize storage
@@ -211,17 +212,33 @@ class AgentLoop:
         branch = f"autotrain/{self._run_id}"
         create_branch(self._repo, branch)
 
-        run = Run(
-            id=self._run_id,
-            repo_path=str(self._repo),
-            metric_name=self._config.metric.name,
-            metric_target=self._config.metric.target,
-            metric_direction=self._config.metric.direction,
-            status=RunStatus.RUNNING,
-            git_branch=branch,
-            config_snapshot=self._config.model_dump_json(),
-        )
-        create_run(self._conn, run)
+        if not self._record_pre_created:
+            run = Run(
+                id=self._run_id,
+                repo_path=str(self._repo),
+                metric_name=self._config.metric.name,
+                metric_target=self._config.metric.target,
+                metric_direction=self._config.metric.direction,
+                status=RunStatus.RUNNING,
+                git_branch=branch,
+                config_snapshot=self._config.model_dump_json(),
+            )
+            create_run(self._conn, run)
+        else:
+            # Update the pre-existing record with branch info
+            from autotrain.storage.queries import get_run
+            existing = get_run(self._conn, self._run_id)
+            if existing is not None:
+                existing.git_branch = branch
+                existing.config_snapshot = self._config.model_dump_json()
+                # Update branch and config_snapshot on existing record
+                self._conn.execute(
+                    """UPDATE runs SET git_branch = ?, config_snapshot = ?,
+                       status = ? WHERE id = ?""",
+                    (branch, self._config.model_dump_json(),
+                     RunStatus.RUNNING.value, self._run_id),
+                )
+                self._conn.commit()
 
         self._sm = StateMachine(self._conn, self._run_id)
         self._sm.transition(AgentState.READING_STATE)

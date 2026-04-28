@@ -108,3 +108,31 @@ export const fetchGpuSnapshots = (runId: string, limit = 500) =>
 
 export const fetchGpuLatest = (runId: string) =>
   fetchJson<GpuSnapshot>(`${BASE}/runs/${runId}/gpu/latest`)
+
+// -- New API functions (Milestone #2 revisions) --
+
+export const resumeRun = (runId: string, startImmediately = true) =>
+  fetchJson<ResumeRunResponse>(`${BASE}/runs/${runId}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ run_id: runId, start_immediately: startImmediately }),
+  })
+
+export const fetchDefaults = () =>
+  fetchJson<DefaultsResponse>(`${BASE}/defaults`)
+
+export const saveConfig = (repoPath: string, configYaml: string) =>
+  fetchJson<SaveConfigResponse>(`${BASE}/save-config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo_path: repoPath, config_yaml: configYaml }),
+  })
+
+// Types imported from types.ts above, re-exported via local types
+import type {
+  ResumeRunResponse,
+  RunLogsResponse,
+  ArtifactsListResponse,
+  DefaultsResponse,
+  SaveConfigResponse,
+} from './types'

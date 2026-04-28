@@ -125,12 +125,125 @@ class CreateRunRequest(BaseModel):
 
 
 class CreateRunResponse(BaseModel):
-    """Response after creating a run."""
+    """Response after creating a run.
+
+    * success — run created and optionally started
+    * invalid_config — config validation errors (caller should return 400)
+    * conflict — another active run exists on the same repo (caller should return 409)
+    """
 
     run_id: str
-    status: str
+    status: str  # "running", "stopped", "invalid_config", "conflict"
     message: str
     config_errors: list[ConfigValidationError] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Run resume
+# ---------------------------------------------------------------------------
+
+
+class ResumeRunRequest(BaseModel):
+    """Request to create a new run that resumes from a prior run's state."""
+
+    run_id: str = Field(
+        ...,
+        description="The ID of the prior run to resume from.",
+    )
+    start_immediately: bool = Field(
+        default=True,
+        description="Whether to start the new run immediately after creation.",
+    )
+
+
+class ResumeRunResponse(BaseModel):
+    """Response after creating a resume run."""
+
+    new_run_id: str
+    prior_run_id: str
+    status: str
+    message: str
+    resumed_from_checkpoint: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Config endpoint
+# ---------------------------------------------------------------------------
+
+
+class RunConfigResponse(BaseModel):
+    """Current configuration for a run (parsed from config_snapshot)."""
+
+    run_id: str
+    config_yaml: str | None = None
+    config_json: dict | None = None
+
+
+# ---------------------------------------------------------------------------
+# Logs endpoint
+# ---------------------------------------------------------------------------
+
+
+class RunLogsResponse(BaseModel):
+    """Training log output for a run."""
+
+    run_id: str
+    lines: list[str] = Field(default_factory=list)
+    total_lines: int = 0
+    truncated: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Artifacts endpoint
+# ---------------------------------------------------------------------------
+
+
+class ArtifactInfo(BaseModel):
+    """Information about a single artifact file."""
+
+    name: str
+    path: str
+    size_bytes: int
+    modified: str | None = None
+
+
+class ArtifactsListResponse(BaseModel):
+    """List of artifacts for a run."""
+
+    run_id: str
+    artifacts: list[ArtifactInfo] = Field(default_factory=list)
+    total_bytes: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Defaults endpoint
+# ---------------------------------------------------------------------------
+
+
+class DefaultsResponse(BaseModel):
+    """Default configuration template for new runs."""
+
+    config_yaml: str
+
+
+# ---------------------------------------------------------------------------
+# Save-config endpoint
+# ---------------------------------------------------------------------------
+
+
+class SaveConfigRequest(BaseModel):
+    """Request to save a configuration to a repo."""
+
+    repo_path: str = Field(..., description="Path to the training repository.")
+    config_yaml: str = Field(..., min_length=1, description="Full autotrain.yaml content.")
+
+
+class SaveConfigResponse(BaseModel):
+    """Response after saving a configuration."""
+
+    success: bool
+    path: str
+    message: str
 
 
 # ---------------------------------------------------------------------------

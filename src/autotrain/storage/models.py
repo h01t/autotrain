@@ -43,6 +43,7 @@ class Run:
     total_api_cost: float = 0.0
     git_branch: str | None = None
     config_snapshot: str | None = None  # JSON dump of RunConfig
+    resumed_from_run_id: str | None = None  # Prior run ID if this is a resume
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 

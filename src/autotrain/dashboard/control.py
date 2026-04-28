@@ -36,6 +36,7 @@ from .models import (
     PreflightRequest,
     PreflightResponse,
     PreflightResult,
+    ResumeRunResponse,
     RunActionResponse,
     RunStatusResponse,
     ValidateConfigRequest,
@@ -490,6 +491,68 @@ class RunManager:
         self._active_runs: dict[str, _RunHandle] = {}
         self._lock = threading.Lock()
 
+    # -- Shared helpers -------------------------------------------------------
+
+    def _find_active_run_on_repo(self, repo_path: Path) -> str | None:
+        """Return the run_id of an active run on the same repo, or None."""
+        resolved = str(repo_path.resolve())
+        with self._lock:
+            for active_id, handle in self._active_runs.items():
+                if handle.thread is not None and handle.thread.is_alive():
+                    try:
+                        conn = init_db(self._db_path)
+                        active_run = get_run(conn, active_id)
+                        conn.close()
+                    except Exception:
+                        continue
+                    if (
+                        active_run is not None
+                        and str(Path(active_run.repo_path).resolve()) == resolved
+                    ):
+                        return active_id
+        return None
+
+    def _run_quick_preflight(
+        self, repo_path: Path, train_command: str = "python train.py",
+    ) -> list[PreflightResult]:
+        """Run essential preflight checks and return failures (empty = all passed)."""
+        failures: list[PreflightResult] = []
+        resolved = repo_path.resolve()
+        if not resolved.is_dir():
+            failures.append(PreflightResult(
+                check="repo_exists", passed=False,
+                message=f"Repository not found: {resolved}",
+                suggestion=f"mkdir -p {resolved}",
+            ))
+            return failures  # Can't do further checks without a repo
+
+        # Writable check
+        autotrain_dir = resolved / ".autotrain"
+        try:
+            autotrain_dir.mkdir(parents=True, exist_ok=True)
+            test = autotrain_dir / ".write_test"
+            test.write_text("ok")
+            test.unlink()
+        except (OSError, PermissionError) as e:
+            failures.append(PreflightResult(
+                check="directory_writable", passed=False,
+                message=f"Cannot write to repository: {e}",
+                suggestion=f"chmod -R u+w {resolved}",
+            ))
+
+        # Train script check
+        train_parts = train_command.split()
+        if len(train_parts) > 1 and train_parts[0] in ("python", "python3"):
+            script_path = resolved / train_parts[-1]
+            if not script_path.exists():
+                failures.append(PreflightResult(
+                    check="train_script", passed=False,
+                    message=f"Training script not found: {train_parts[-1]}",
+                    suggestion=f"Create {script_path} with training code.",
+                ))
+
+        return failures
+
     @property
     def active_run_ids(self) -> list[str]:
         with self._lock:
@@ -529,7 +592,12 @@ class RunManager:
     def create_and_start(
         self, request: CreateRunRequest,
     ) -> CreateRunResponse:
-        """Create a run record and optionally start it in the background."""
+        """Create a run record and optionally start it in the background.
+
+        Returns a CreateRunResponse with status 'invalid_config' for
+        validation errors.  Callers must check the status and return
+        HTTP 400 for 'invalid_config'.
+        """
         # Parse and validate config
         data = _parse_yaml_safe(request.config_yaml)
         if data is None:
@@ -560,6 +628,29 @@ class RunManager:
             )
 
         repo_path = Path(repo_path_str).resolve()
+
+        # ── Same-repo active-run guard (only when starting) ──
+        if request.start_immediately:
+            conflict_id = self._find_active_run_on_repo(repo_path)
+            if conflict_id is not None:
+                return CreateRunResponse(
+                    run_id="",
+                    status="conflict",
+                    message=(
+                        f"Another run (id={conflict_id}) is already active "
+                        f"on repository {repo_path}. Stop it before "
+                        f"starting a new run."
+                    ),
+                    config_errors=[
+                        ConfigValidationError(
+                            field="repo_path",
+                            message=(
+                                f"Another run (id={conflict_id}) is already "
+                                "active on this repository."
+                            ),
+                        ),
+                    ],
+                )
 
         # Load full config
         try:
@@ -595,6 +686,20 @@ class RunManager:
             conn.close()
 
         if request.start_immediately:
+            # ── Quick preflight gate ─────────────────────────────────
+            failures = self._run_quick_preflight(
+                repo_path, config.execution.train_command,
+            )
+            if failures:
+                return CreateRunResponse(
+                    run_id=run_id,
+                    status="invalid_config",
+                    message=f"Preflight failed: {failures[0].message}",
+                    config_errors=[
+                        ConfigValidationError(field="preflight", message=f.message)
+                        for f in failures
+                    ],
+                )
             self._start_run_async(run_id, config)
 
         return CreateRunResponse(
@@ -612,6 +717,21 @@ class RunManager:
                 return RunActionResponse(
                     run_id=run_id, action="start",
                     success=False, message="Run not found.",
+                )
+
+            # ── Same-repo active-run guard ──────────────────────
+            repo_path = Path(run.repo_path).resolve()
+            conflict_id = self._find_active_run_on_repo(repo_path)
+            if conflict_id is not None and conflict_id != run_id:
+                return RunActionResponse(
+                    run_id=run_id, action="start",
+                    success=False,
+                    message=(
+                        f"Another run (id={conflict_id}) is already active "
+                        f"on this repository. Stop it first."
+                    ),
+                    previous_status=run.status.value,
+                    new_status=run.status.value,
                 )
 
             previous_status = run.status.value
@@ -633,6 +753,19 @@ class RunManager:
             repo_path = Path(run.repo_path)
             config = load_config(repo_path, cli_overrides=config_data)
 
+            # ── Quick preflight gate ─────────────────────────────────
+            failures = self._run_quick_preflight(
+                Path(run.repo_path), config.execution.train_command,
+            )
+            if failures:
+                return RunActionResponse(
+                    run_id=run_id, action="start",
+                    success=False,
+                    message=f"Preflight failed: {failures[0].message}",
+                    previous_status=previous_status,
+                    new_status=previous_status,
+                )
+
             update_run_status(conn, run_id, RunStatus.RUNNING)
             self._start_run_async(run_id, config)
 
@@ -646,7 +779,11 @@ class RunManager:
             conn.close()
 
     def stop_run(self, run_id: str) -> RunActionResponse:
-        """Stop a running run."""
+        """Stop a running run.
+
+        Preserves terminal statuses (FAILED, COMPLETED, BUDGET_EXHAUSTED).
+        Only transitions RUNNING -> STOPPED.
+        """
         conn = init_db(self._db_path)
         try:
             run = get_run(conn, run_id)
@@ -658,13 +795,31 @@ class RunManager:
 
             previous_status = run.status.value
 
+            # Preserve terminal statuses — don't overwrite them
+            if run.status in (
+                RunStatus.FAILED,
+                RunStatus.COMPLETED,
+                RunStatus.BUDGET_EXHAUSTED,
+            ):
+                return RunActionResponse(
+                    run_id=run_id, action="stop",
+                    success=True,
+                    message=(
+                        f"Run is already in terminal state "
+                        f"'{run.status.value}' — not modified."
+                    ),
+                    previous_status=previous_status,
+                    new_status=previous_status,
+                )
+
             with self._lock:
                 handle = self._active_runs.get(run_id)
                 if handle is None:
                     update_run_status(conn, run_id, RunStatus.STOPPED)
                     return RunActionResponse(
                         run_id=run_id, action="stop",
-                        success=True, message="Run was not active. Status set to stopped.",
+                        success=True,
+                        message="Run was not active. Status set to stopped.",
                         previous_status=previous_status,
                         new_status="stopped",
                     )
@@ -723,6 +878,109 @@ class RunManager:
         finally:
             conn.close()
 
+    def resume_run(
+        self, prior_run_id: str, start_immediately: bool = True,
+    ) -> ResumeRunResponse:
+        """Create a new run that resumes from a prior run's state.
+
+        The new run:
+        - Gets a unique run_id
+        - Links to prior_run_id via resumed_from_run_id
+        - Copies the prior run's config
+        - Optionally starts immediately
+
+        Returns 409 status if another run is active on the same repo.
+        """
+        conn = init_db(self._db_path)
+        try:
+            prior_run = get_run(conn, prior_run_id)
+            if prior_run is None:
+                return ResumeRunResponse(
+                    new_run_id="", prior_run_id=prior_run_id,
+                    status="not_found",
+                    message=f"Prior run {prior_run_id} not found.",
+                )
+
+            # ── Same-repo active-run guard ──────────────────────
+            if start_immediately:
+                repo_path = Path(prior_run.repo_path).resolve()
+                conflict_id = self._find_active_run_on_repo(repo_path)
+                if conflict_id is not None:
+                    return ResumeRunResponse(
+                        new_run_id="",
+                        prior_run_id=prior_run_id,
+                        status="conflict",
+                        message=(
+                            f"Another run (id={conflict_id}) is already active "
+                            f"on this repository. Stop it first."
+                        ),
+                    )
+
+            # Determine if there's a checkpoint to resume from
+            has_checkpoint = False
+            checkpoint_path = (
+                Path(prior_run.repo_path) / ".autotrain" / "checkpoints"
+                / prior_run_id
+            )
+            if checkpoint_path.is_dir():
+                pth_files = list(checkpoint_path.glob("*.pt")) + list(
+                    checkpoint_path.glob("*.pth")
+                )
+                if pth_files:
+                    has_checkpoint = True
+
+            # Load prior config
+            config_data = (
+                json.loads(prior_run.config_snapshot)
+                if prior_run.config_snapshot else {}
+            )
+            repo_path = Path(prior_run.repo_path)
+            config = load_config(repo_path, cli_overrides=config_data)
+
+            # Create new run record
+            new_run_id = str(uuid.uuid4())[:8]
+            new_run = Run(
+                id=new_run_id,
+                repo_path=prior_run.repo_path,
+                metric_name=prior_run.metric_name,
+                metric_target=prior_run.metric_target,
+                metric_direction=prior_run.metric_direction,
+                status=(
+                    RunStatus.RUNNING if start_immediately
+                    else RunStatus.STOPPED
+                ),
+                config_snapshot=prior_run.config_snapshot,
+                resumed_from_run_id=prior_run_id,
+            )
+            create_run_record(conn, new_run)
+        finally:
+            conn.close()
+
+        if start_immediately:
+            # ── Quick preflight gate ─────────────────────────────────
+            failures = self._run_quick_preflight(
+                repo_path, config.execution.train_command,
+            )
+            if failures:
+                return ResumeRunResponse(
+                    new_run_id=new_run_id,
+                    prior_run_id=prior_run_id,
+                    status="invalid_config",
+                    message=f"Preflight failed: {failures[0].message}",
+                )
+            self._start_run_async(new_run_id, config)
+
+        return ResumeRunResponse(
+            new_run_id=new_run_id,
+            prior_run_id=prior_run_id,
+            status="running" if start_immediately else "stopped",
+            message=(
+                f"Resume run {new_run_id} created from {prior_run_id}"
+                f"{' and started' if start_immediately else ''}."
+            ),
+            resumed_from_checkpoint=has_checkpoint,
+        )
+
     def _start_run_async(self, run_id: str, config: RunConfig) -> None:
         """Launch the agent loop in a background thread."""
         handle = _RunHandle()
@@ -730,8 +988,7 @@ class RunManager:
 
         def _run_target() -> None:
             try:
-                loop = AgentLoop(config)
-                loop._run_id = run_id  # Override with our run_id
+                loop = AgentLoop(config, run_id=run_id)
                 handle.loop = loop
                 final_status = loop.run()
 

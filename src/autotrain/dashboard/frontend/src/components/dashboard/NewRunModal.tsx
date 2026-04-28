@@ -59,6 +59,15 @@ export function NewRunModal({ isOpen, onClose, onRunCreated }: NewRunModalProps)
       setPreflightGpus([])
       setPreflightPassed(null)
       setCreateError(null)
+      // Fetch default config template
+      fetch('/api/v1/defaults')
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.config_yaml) setConfigYaml(d.config_yaml)
+        })
+        .catch(() => {
+          // Keep default if fetch fails
+        })
     }
   }, [isOpen])
 
@@ -189,6 +198,12 @@ export function NewRunModal({ isOpen, onClose, onRunCreated }: NewRunModalProps)
               {t === 'edit' && '1. Edit Config'}
               {t === 'validate' && '2. Validate'}
               {t === 'preflight' && '3. Preflight'}
+              {t === 'preflight' && preflightPassed == null && isValid === true && (
+                <span className="ml-1 text-yellow-500 text-xs">(required)</span>
+              )}
+              {t === 'preflight' && preflightPassed === true && (
+                <span className="ml-1 text-green-500 text-xs">✓</span>
+              )}
             </button>
           ))}
         </div>
@@ -337,7 +352,14 @@ export function NewRunModal({ isOpen, onClose, onRunCreated }: NewRunModalProps)
             )}
             <button
               onClick={handleCreate}
-              disabled={creating || isValid !== true}
+              disabled={creating || isValid !== true || preflightPassed !== true}
+              title={
+                isValid !== true
+                  ? 'Validate config first'
+                  : preflightPassed !== true
+                    ? 'Run preflight first'
+                    : 'Create and start training'
+              }
               className="px-6 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded text-sm font-semibold transition-colors"
             >
               {creating ? 'Creating...' : 'Create Run'}
