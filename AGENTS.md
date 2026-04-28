@@ -117,6 +117,10 @@ Phase 3 → SaaS only after execution is fully containerized and hardened.
 Phase 1.0 — Multi-File Safety & UI Control → **Atomic multi-file edit safety COMPLETED**
 
 **Phase 1.0 — Multi-File Safety & UI Control (Next 4–6 weeks)**
+Phase 1.0 — Multi-File Safety & UI Control
+- Atomic multi-file edit safety → COMPLETED
+- Full dashboard run creation and control → COMPLETED
+
 1. Atomic multi-file edit safety (codex spec → DeepSeek impl).  
 2. Full dashboard run creation + control.  
 3. Git worktree isolation.  
