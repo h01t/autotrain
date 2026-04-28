@@ -114,6 +114,7 @@ Phase 3 → SaaS only after execution is fully containerized and hardened.
 - Agent loop must respect `max_changes_per_iteration` and budget at all times.
 
 ## 5. Roadmap Milestones (Current Focus = Phase 1)
+Phase 1.0 — Multi-File Safety & UI Control → **Atomic multi-file edit safety COMPLETED**
 
 **Phase 1.0 — Multi-File Safety & UI Control (Next 4–6 weeks)**
 1. Atomic multi-file edit safety (codex spec → DeepSeek impl).  
