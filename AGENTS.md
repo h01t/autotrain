@@ -97,6 +97,7 @@ Phase 3 → SaaS only after execution is fully containerized and hardened.
 - `src/autotrain/agent/parser.py` — Supports dual JSON formats: legacy (`file`/`action`/`search`/`replace`) and Pydantic (`path`/`operation`/`content`/`patch`). Legacy `replace` maps to `update` with placeholder content.  
 - `src/autotrain/core/agent_loop.py` — Routes all edits through `apply_patch_set_atomically()`; per-file `_apply_changes()` replaced.  
 - `src/autotrain/experiment/git_ops.py` — Added `stage_exact_files()` (handles deletions via `git rm`), `staged_files()`, `verify_staged_matches()`, `commit_staged()`, `create_worktree()`/`remove_worktree()`.
+- Batch limits: ``max_files`` and ``max_total_bytes`` are batch-level caps; ``max_file_size_bytes`` (in ``SandboxConfig``) is a per-file cap. Both must pass independently.
 **Git Workflow**
 - `main` is always deployable.  
 - Rebase before PR.  

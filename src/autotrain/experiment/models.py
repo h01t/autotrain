@@ -25,7 +25,7 @@ class FileChange(BaseModel, extra="forbid", frozen=True):
     *operation*:
 
     * ``create``  – ``content`` is required, ``patch`` is forbidden.
-    * ``update``  – ``content`` **or** ``patch`` must be set (not both).
+    * ``update``  – ``content`` must be set (``patch`` is rejected).
     * ``delete``  – neither ``content`` nor ``patch`` may be set.
     """
 
@@ -44,7 +44,7 @@ class FileChange(BaseModel, extra="forbid", frozen=True):
     )
     patch: str | None = Field(
         default=None,
-        description="Unified-diff patch to apply for update operations.",
+        description="Unified-diff patch (REJECTED in this milestone — use content).",
     )
     description: str | None = Field(
         default=None,
@@ -67,13 +67,14 @@ class FileChange(BaseModel, extra="forbid", frozen=True):
                 )
 
         elif op == "update":
-            if self.content is None and self.patch is None:
+            if self.patch is not None:
                 raise ValueError(
-                    "update operation requires either 'content' or 'patch'."
+                    "Patch-based updates are not supported in this milestone. "
+                    "Use 'content' for full-file updates."
                 )
-            if self.content is not None and self.patch is not None:
+            if self.content is None:
                 raise ValueError(
-                    "update operation accepts 'content' or 'patch', not both."
+                    "update operation requires 'content' to be set."
                 )
 
         elif op == "delete":
@@ -86,10 +87,15 @@ class FileChange(BaseModel, extra="forbid", frozen=True):
 
     @field_validator("path")
     @classmethod
-    def _path_not_empty_or_whitespace(cls, v: str) -> str:
+    def _path_sanitize(cls, v: str) -> str:
         stripped = v.strip()
         if not stripped:
             raise ValueError("path must not be empty or whitespace-only")
+        for ch in stripped:
+            if ord(ch) < 0x20 and ch not in ("\t",):
+                raise ValueError(
+                    f"path contains control character U+{ord(ch):04X}"
+                )
         return stripped
 
 

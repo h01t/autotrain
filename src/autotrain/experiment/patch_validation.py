@@ -193,7 +193,17 @@ def check_batch_limits(
     max_files: int,
     max_total_bytes: int,
 ) -> None:
-    """Raise ``BatchValidationError`` if batch exceeds safety limits."""
+    """Raise ``BatchValidationError`` if batch exceeds safety limits.
+
+    .. note::
+
+       ``max_total_bytes`` is a *batch-level* payload limit (sum of
+       all file contents).  It is **independent** of the per-file
+       size limit enforced by ``SandboxConfig.max_file_size_bytes``
+       in the legacy validation layer.
+
+       Both limits must be satisfied for a batch to be accepted.
+    """
     if count > max_files:
         raise BatchValidationError(
             f"Batch file count {count} exceeds limit {max_files}"
@@ -252,10 +262,14 @@ def validate_patch_set(
 ) -> ValidatedPatchSet:
     """Validate an entire batch of *FileChange* objects.
 
+    *max_files* and *max_total_bytes* are batch-level limits.
+    Per-file size limits are enforced separately by the caller
+    (see :class:`~autotrain.config.schema.SandboxConfig`).
+
     This is the single entry point that the sandbox / agent loop
     should call before any filesystem mutation.
 
-    Returns a ``ValidatedPatchSet`` that is safe to pass to the
+    Returns a :class:`ValidatedPatchSet` that is safe to pass to the
     atomic apply pipeline.
     """
     validated: list[ValidatedFileChange] = []

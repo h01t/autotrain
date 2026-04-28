@@ -9,14 +9,17 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 import structlog
 
+from autotrain.experiment.patch_validation import AutoTrainEditError
+
 log = structlog.get_logger()
 
 
-class GitError(Exception):
+class GitError(AutoTrainEditError):
     """Raised when a git command fails."""
 
 
@@ -79,27 +82,28 @@ def get_current_commit(repo_path: Path) -> str:
 # ── worktree isolation ────────────────────────────────────────────
 
 
-def create_worktree(repo_path: Path, suffix: str = "autotrain") -> Path:
-    """Create a temporary git worktree for isolated edits.
+def create_worktree(
+    repo_path: Path, suffix: str = "autotrain",
+) -> tuple[Path, str]:
+    """Create a temporary git worktree on a new throwaway branch.
 
-    The worktree is created inside a temp directory and shares the
-    repository's object store.  The caller is responsible for calling
-    ``remove_worktree``.
+    The worktree is checked out from HEAD onto a uniquely-named
+    temporary branch so that commits inside the worktree are
+    reachable by the source repository for merging.
 
     Args:
         repo_path: Path to the main (bare or working) repo.
         suffix: Human-readable tag for the worktree directory name.
 
     Returns:
-        Path to the new worktree root.
+        Tuple of ``(worktree_path, branch_name)``.  The caller MUST
+        call ``remove_worktree`` and delete the branch on cleanup.
 
     Raises:
-        GitError: If the worktree cannot be created (no fallback!).
+        GitError: If the worktree cannot be created.
     """
-    # Ensure we have at least one commit — worktree requires it
     result = _run_git(repo_path, "rev-parse", "HEAD", check=False)
     if result.returncode != 0:
-        # Create an empty commit so worktree has a tree to check out
         _run_git(
             repo_path, "commit",
             "--allow-empty",
@@ -108,18 +112,17 @@ def create_worktree(repo_path: Path, suffix: str = "autotrain") -> Path:
         )
         log.info("git_empty_commit_created")
 
+    branch_name = f"autotrain-wt-{uuid.uuid4().hex[:12]}"
     parent = Path(tempfile.mkdtemp(prefix="autotrain-wt-"))
     wt_path = parent / suffix
 
     try:
-        _run_git(repo_path, "worktree", "add", str(wt_path), "HEAD")
-        log.info("git_worktree_created", path=str(wt_path))
-        return wt_path
+        _run_git(repo_path, "worktree", "add", "-b", branch_name, str(wt_path), "HEAD")
+        log.info("git_worktree_created", path=str(wt_path), branch=branch_name)
+        return wt_path, branch_name
     except GitError:
-        # Clean up temp dir on failure
         shutil.rmtree(parent, ignore_errors=True)
         raise
-
 
 def remove_worktree(repo_path: Path, wt_path: Path) -> None:
     """Remove a git worktree and its parent temp directory.
@@ -136,6 +139,31 @@ def remove_worktree(repo_path: Path, wt_path: Path) -> None:
     if parent.exists():
         shutil.rmtree(parent, ignore_errors=True)
         log.info("git_worktree_cleaned", path=str(parent))
+
+
+def merge_worktree_branch(repo_path: Path, branch_name: str) -> str:
+    """Merge a worktree's branch back into the current branch.
+
+    Returns the merge commit short hash.
+    Raises GitError if merge fails.
+    """
+    try:
+        _run_git(repo_path, "merge", "--no-ff", branch_name, "-m",
+                 "autotrain: merge atomic edit batch")
+    except GitError:
+        _run_git(repo_path, "merge", "--abort", check=False)
+        _run_git(repo_path, "branch", "-D", branch_name, check=False)
+        raise
+
+    sha = get_current_commit(repo_path)
+    log.info("git_worktree_merged", branch=branch_name, commit=sha)
+    return sha
+
+
+def delete_branch(repo_path: Path, branch_name: str) -> None:
+    """Best-effort branch deletion — never raises."""
+    _run_git(repo_path, "branch", "-D", branch_name, check=False)
+    log.info("git_branch_deleted", branch=branch_name)
 
 
 # ── precise staging & committing ──────────────────────────────────

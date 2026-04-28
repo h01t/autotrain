@@ -18,12 +18,16 @@ from autotrain.config.schema import SandboxConfig
 from autotrain.experiment.git_ops import (
     GitError,
     commit_staged,
+    create_worktree,
+    delete_branch,
+    merge_worktree_branch,
+    remove_worktree,
     stage_exact_files,
     verify_staged_matches,
 )
 from autotrain.experiment.models import FileChange as PydanticFileChange
 from autotrain.experiment.patch_validation import (
-    AtomicApplyError,
+    AutoTrainEditError,
     PatchPreconditionError,
     PostApplyVerificationError,
     ValidatedFileChange,
@@ -69,7 +73,11 @@ class ValidationResult:
 
 @dataclass
 class AtomicApplyResult:
-    """Result of an atomic multi-file apply operation."""
+    """Result of an atomic multi-file apply operation.
+
+    *error_type* is always a class name from the
+    :class:`AutoTrainEditError` hierarchy (or ``None`` on success).
+    """
 
     success: bool
     commit_sha: str | None = None
@@ -95,23 +103,24 @@ def apply_patch_set_atomically(
     The pipeline:
 
     1. Validate the entire batch (paths, policy, preconditions).
-    2. Apply every change directly to *repo_path* inside a
-       git-protected transaction.
-    3. Post-apply verification — assert on-disk state matches intent.
-    4. Stage **only** the approved files.
-    5. Verify staged set matches expected.
-    6. Commit.
-    7. On any failure, ``git checkout .`` to revert all changes.
+    2. Create an isolated git worktree on a temporary branch.
+    3. Validate preconditions inside the worktree.
+    4. Apply every change inside the worktree.
+    5. Post-apply verification.
+    6. Stage & verify only the approved files.
+    7. Commit in the worktree.
+    8. Merge the worktree branch back into the source repo.
+    9. Clean up (worktree + temp branch).
 
-    The agent loop is expected to operate on a dedicated feature
-    branch (e.g. ``autotrain/{run_id}``), so the working directory
-    is already isolated from the user's main branch.
+    If **any** step fails before the merge (step 8), the worktree
+    and temp branch are discarded — the source repository is never
+    touched.
 
     Returns:
         ``AtomicApplyResult`` with success flag, commit SHA, and/or
         structured error information.
     """
-    # -- Step 1: batch validation ----------------------------------
+    # -- Step 1: batch validation (no filesystem access yet) --------
     try:
         validated = validate_patch_set(
             pydantic_changes,
@@ -119,7 +128,7 @@ def apply_patch_set_atomically(
             max_files=max_files,
             max_total_bytes=max_total_bytes,
         )
-    except Exception as exc:
+    except AutoTrainEditError as exc:
         log.warning("atomic_validation_failed", error=str(exc))
         return AtomicApplyResult(
             success=False,
@@ -128,11 +137,25 @@ def apply_patch_set_atomically(
             error_type=type(exc).__name__,
         )
 
+    # -- Step 2: create isolated worktree ---------------------------
+    worktree: Path | None = None
+    branch_name: str | None = None
     try:
-        # -- Step 2: precondition checks ---------------------------
+        worktree, branch_name = create_worktree(repo_path)
+    except GitError as exc:
+        log.error("atomic_worktree_create_failed", error=str(exc))
+        return AtomicApplyResult(
+            success=False,
+            validated_count=len(validated.changes),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+    try:
+        # -- Step 3: precondition checks (in isolation) ------------
         for vc in validated.changes:
             try:
-                validate_change_preconditions(vc, repo_path)
+                validate_change_preconditions(vc, worktree)
             except PatchPreconditionError as exc:
                 return AtomicApplyResult(
                     success=False,
@@ -141,10 +164,9 @@ def apply_patch_set_atomically(
                     error_type=type(exc).__name__,
                 )
 
-        # -- Step 3: apply all changes -----------------------------
-        apply_errors = _apply_validated_changes(validated.changes, repo_path)
+        # -- Step 4: apply all changes in worktree -----------------
+        apply_errors = _apply_validated_changes(validated.changes, worktree)
         if apply_errors:
-            _rollback_repo_changes(repo_path)
             return AtomicApplyResult(
                 success=False,
                 validated_count=len(validated.changes),
@@ -152,11 +174,10 @@ def apply_patch_set_atomically(
                 error_type="AtomicApplyError",
             )
 
-        # -- Step 4: post-apply verification -----------------------
+        # -- Step 5: post-apply verification -----------------------
         try:
-            _verify_applied_patch_set(validated, repo_path)
+            _verify_applied_patch_set(validated, worktree)
         except PostApplyVerificationError as exc:
-            _rollback_repo_changes(repo_path)
             return AtomicApplyResult(
                 success=False,
                 validated_count=len(validated.changes),
@@ -164,50 +185,62 @@ def apply_patch_set_atomically(
                 error_type=type(exc).__name__,
             )
 
-        # -- Step 5: stage only approved files ---------------------
+        # -- Step 6: stage only approved files ---------------------
         approved_paths = sorted(validated.canonical_paths)
-        stage_exact_files(repo_path, approved_paths)
+        stage_exact_files(worktree, approved_paths)
 
-        # -- Step 6: verify staged set -----------------------------
+        # -- Step 7: verify staged set -----------------------------
         try:
-            verify_staged_matches(repo_path, validated.canonical_paths)
+            verify_staged_matches(worktree, validated.canonical_paths)
         except GitError as exc:
-            _rollback_repo_changes(repo_path)
             return AtomicApplyResult(
                 success=False,
                 validated_count=len(validated.changes),
                 error=str(exc),
-                error_type="GitCommitError",
+                error_type=type(exc).__name__,
             )
 
-        # -- Step 7: commit ----------------------------------------
+        # -- Step 8: commit in worktree ----------------------------
         try:
-            sha = commit_staged(repo_path, commit_message)
+            commit_staged(worktree, commit_message)
         except GitError as exc:
-            _rollback_repo_changes(repo_path)
             return AtomicApplyResult(
                 success=False,
                 validated_count=len(validated.changes),
-                error=f"Commit failed: {exc}",
-                error_type="GitCommitError",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+
+        # -- Step 9: merge worktree branch back into source repo ---
+        try:
+            merge_sha = merge_worktree_branch(repo_path, branch_name)
+        except GitError as exc:
+            # Merge failed — source repo is untouched (merge aborted
+            # inside merge_worktree_branch), but we still need to
+            # clean up the worktree side.
+            return AtomicApplyResult(
+                success=False,
+                validated_count=len(validated.changes),
+                error=str(exc),
+                error_type=type(exc).__name__,
             )
 
         # -- Success -----------------------------------------------
         log.info(
             "atomic_apply_success",
-            commit=sha,
+            commit=merge_sha,
             files=approved_paths,
         )
         return AtomicApplyResult(
             success=True,
-            commit_sha=sha,
+            commit_sha=merge_sha,
             applied_paths=approved_paths,
             validated_count=len(validated.changes),
         )
 
     except Exception as exc:
-        # Catch-all: try to roll back, then return failure
-        _rollback_repo_changes(repo_path)
+        # Catch-all — source repo is never touched because we never
+        # reached the merge step (or it was aborted).
         log.error("atomic_apply_unexpected_error", error=str(exc))
         return AtomicApplyResult(
             success=False,
@@ -216,19 +249,18 @@ def apply_patch_set_atomically(
             error_type=type(exc).__name__,
         )
 
+    finally:
+        # Always clean up: remove temp branch + worktree.
+        # The source repo is untouched unless merge succeeded.
+        if branch_name is not None:
+            delete_branch(repo_path, branch_name)
+        if worktree is not None:
+            try:
+                remove_worktree(repo_path, worktree)
+            except Exception as exc:
+                log.warning("atomic_worktree_cleanup_failed", error=str(exc))
 
 # ── internal apply helpers ────────────────────────────────────────
-
-
-def _rollback_repo_changes(repo_path: Path) -> None:
-    """Best-effort rollback: ``git checkout .`` to discard all
-    working-tree changes."""
-    try:
-        from autotrain.experiment.git_ops import _run_git
-        _run_git(repo_path, "checkout", ".", check=False)
-        log.info("atomic_rollback_complete")
-    except Exception as exc:
-        log.error("atomic_rollback_failed", error=str(exc))
 
 
 def _apply_validated_changes(
@@ -250,43 +282,12 @@ def _apply_validated_changes(
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(vc.content or "")
             elif vc.operation == "update":
-                if vc.content is not None:
-                    target.write_text(vc.content)
-                elif vc.patch is not None:
-                    _apply_unified_diff(target, vc.patch)
+                target.write_text(vc.content or "")
         except Exception as exc:
             errors.append(
                 f"{vc.operation} {vc.canonical_path!r}: {exc}"
             )
     return errors
-
-
-def _apply_unified_diff(target: Path, patch_text: str) -> None:
-    """Apply a unified-diff patch to *target* in-place.
-
-    Uses Python's ``difflib`` to re-construct the expected output.
-    This is intentionally simpler (and safer) than shelling out to
-    ``patch``.
-    """
-    original = target.read_text().splitlines(keepends=True)
-    new_lines = _apply_patch_lines(original, patch_text)
-    target.write_text("".join(new_lines))
-
-
-def _apply_patch_lines(
-    original: list[str],
-    patch_text: str,
-) -> list[str]:
-    """Apply a minimal unified-diff patch to *original* lines.
-
-    Supports only simple context-based hunks (no line-number
-    fallback).  This is deliberately conservative.
-    """
-
-    raise AtomicApplyError(
-        "Unified diff application is not yet fully supported; "
-        "use 'content' for full-file updates."
-    )
 
 
 def _verify_applied_patch_set(

@@ -244,7 +244,7 @@ class TestFileChangeSchema:
         with pytest.raises(Exception):
             FileChange(path="new.py", operation="create", content="x", patch="y")
 
-    def test_update_requires_content_or_patch(self):
+    def test_update_requires_content(self):
         with pytest.raises(Exception):
             FileChange(path="x.py", operation="update")
 
@@ -252,9 +252,10 @@ class TestFileChangeSchema:
         fc = FileChange(path="x.py", operation="update", content="y")
         assert fc.content == "y"
 
-    def test_update_accepts_patch(self):
-        fc = FileChange(path="x.py", operation="update", patch="@@ -1 +1 @@")
-        assert fc.patch is not None
+    def test_update_rejects_patch(self):
+        """Patch is explicitly rejected in this milestone."""
+        with pytest.raises(Exception):
+            FileChange(path="x.py", operation="update", patch="@@ -1 +1 @@")
 
     def test_update_rejects_both(self):
         with pytest.raises(Exception):
