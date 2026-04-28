@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .agent_ws import AgentConnectionManager
 from .api import router as api_router
+from .control import RunManager
 from .ws import ConnectionManager, websocket_endpoint
 
 # React build output directory
@@ -22,6 +23,7 @@ def create_app(db_path: Path) -> FastAPI:
 
     browser_manager = ConnectionManager(db_path, poll_interval=1.0)
     agent_manager = AgentConnectionManager(browser_manager, db_path)
+    run_manager = RunManager(db_path)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -36,6 +38,7 @@ def create_app(db_path: Path) -> FastAPI:
     )
     app.state.db_path = db_path
     app.state.agent_manager = agent_manager
+    app.state.run_manager = run_manager
 
     # REST API
     app.include_router(api_router)

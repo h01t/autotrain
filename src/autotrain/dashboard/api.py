@@ -20,6 +20,14 @@ from autotrain.storage.queries import (
     get_run,
 )
 
+from .models import (
+    CreateRunRequest,
+    PreflightRequest,
+    PreflightResponse,
+    RunActionResponse,
+    ValidateConfigRequest,
+    ValidateConfigResponse,
+)
 from .serializers import (
     serialize_epoch_metric,
     serialize_gpu_snapshot,
@@ -42,6 +50,11 @@ def get_db(request: Request) -> Generator[sqlite3.Connection, None, None]:
         conn.close()
 
 
+def get_run_manager(request: Request):
+    """Get the RunManager from app state."""
+    return request.app.state.run_manager
+
+
 # -- Health -------------------------------------------------------------------
 
 @router.get("/health")
@@ -55,6 +68,69 @@ def health():
 def list_runs(conn: sqlite3.Connection = Depends(get_db)):
     runs = get_all_runs(conn)
     return [serialize_run(r) for r in runs]
+
+
+# -- Run Creation & Control ---------------------------------------------------
+
+@router.post("/runs", status_code=201)
+def create_run(
+    body: CreateRunRequest,
+    manager=Depends(get_run_manager),
+):
+    """Create a new training run, optionally starting it immediately."""
+    return manager.create_and_start(body)
+
+
+@router.post("/runs/{run_id}/start")
+def start_run(
+    run_id: str,
+    manager=Depends(get_run_manager),
+) -> RunActionResponse:
+    """Start a previously created or stopped run."""
+    return manager.start_run(run_id)
+
+
+@router.post("/runs/{run_id}/stop")
+def stop_run(
+    run_id: str,
+    manager=Depends(get_run_manager),
+) -> RunActionResponse:
+    """Stop a running run."""
+    return manager.stop_run(run_id)
+
+
+@router.post("/runs/{run_id}/restart")
+def restart_run(
+    run_id: str,
+    manager=Depends(get_run_manager),
+) -> RunActionResponse:
+    """Restart a failed, stopped, or completed run."""
+    return manager.restart_run(run_id)
+
+
+@router.get("/runs/{run_id}/status")
+def get_run_status(
+    run_id: str,
+    manager=Depends(get_run_manager),
+):
+    """Get the current runtime status of a run (active, pid, uptime)."""
+    return manager.get_run_status(run_id)
+
+
+# -- Preflight & Validation ---------------------------------------------------
+
+@router.post("/runs/preflight")
+def run_preflight(body: PreflightRequest) -> PreflightResponse:
+    """Run GPU and environment preflight checks."""
+    from .control import run_preflight as _run_preflight
+    return _run_preflight(body)
+
+
+@router.post("/runs/validate-config")
+def validate_config(body: ValidateConfigRequest) -> ValidateConfigResponse:
+    """Validate a run configuration YAML without creating a run."""
+    from .control import validate_config as _validate_config
+    return _validate_config(body)
 
 
 # Future placeholder — must come before /runs/{run_id} to avoid route conflict

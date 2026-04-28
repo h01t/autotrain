@@ -10,7 +10,12 @@ import { IterationComparison } from '../components/dashboard/IterationComparison
 import { BudgetTracker } from '../components/dashboard/BudgetTracker'
 import { GpuResources } from '../components/dashboard/GpuResources'
 
-export function RunDashboard({ runId }: { runId: string }) {
+interface RunDashboardProps {
+  runId: string
+  onRefresh?: () => void
+}
+
+export function RunDashboard({ runId, onRefresh }: RunDashboardProps) {
   useWebSocket(runId)
 
   const { data: run, isLoading: runLoading } = useRun(runId)
@@ -30,7 +35,7 @@ export function RunDashboard({ runId }: { runId: string }) {
 
   return (
     <div className="flex-1 overflow-y-auto p-6">
-      <Header run={run} />
+      <Header run={run} onRefresh={onRefresh} />
       <MetricCards run={run} />
       <MetricProgressChart run={run} snapshots={snaps} iterations={iters} />
       <TrainingCurves runId={runId} iterations={iters} />

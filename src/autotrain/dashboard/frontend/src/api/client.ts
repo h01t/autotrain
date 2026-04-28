@@ -4,12 +4,17 @@ import type {
   MetricSnapshot,
   EpochMetric,
   GpuSnapshot,
+  ValidateConfigResponse,
+  PreflightResponse,
+  CreateRunResponse,
+  RunActionResponse,
+  RunStatusResponse,
 } from './types'
 
 const BASE = '/api/v1'
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url)
+async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(url, options)
   if (!res.ok) {
     throw new Error(`API error: ${res.status} ${res.statusText}`)
   }
@@ -21,6 +26,58 @@ export const fetchRuns = () => fetchJson<Run[]>(`${BASE}/runs`)
 
 export const fetchRun = (runId: string) =>
   fetchJson<Run>(`${BASE}/runs/${runId}`)
+
+// -- Run Creation & Control --
+export const createRun = (configYaml: string, startImmediately = true) =>
+  fetchJson<CreateRunResponse>(`${BASE}/runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      config_yaml: configYaml,
+      start_immediately: startImmediately,
+    }),
+  })
+
+export const startRun = (runId: string) =>
+  fetchJson<RunActionResponse>(`${BASE}/runs/${runId}/start`, {
+    method: 'POST',
+  })
+
+export const stopRun = (runId: string) =>
+  fetchJson<RunActionResponse>(`${BASE}/runs/${runId}/stop`, {
+    method: 'POST',
+  })
+
+export const restartRun = (runId: string) =>
+  fetchJson<RunActionResponse>(`${BASE}/runs/${runId}/restart`, {
+    method: 'POST',
+  })
+
+export const fetchRunStatus = (runId: string) =>
+  fetchJson<RunStatusResponse>(`${BASE}/runs/${runId}/status`)
+
+// -- Preflight & Validation --
+export const validateConfig = (configYaml: string) =>
+  fetchJson<ValidateConfigResponse>(`${BASE}/runs/validate-config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config_yaml: configYaml }),
+  })
+
+export const runPreflight = (body: {
+  repo_path: string
+  mode?: string
+  ssh_host?: string
+  ssh_port?: number
+  gpu_device?: string
+  venv_activate?: string
+  train_command?: string
+}) =>
+  fetchJson<PreflightResponse>(`${BASE}/runs/preflight`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
 
 // -- Iterations --
 export const fetchIterations = (runId: string, limit = 100) =>

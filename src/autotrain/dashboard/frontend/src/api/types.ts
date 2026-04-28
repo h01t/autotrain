@@ -88,3 +88,63 @@ export const OUTCOME_ICONS: Record<string, string> = {
   no_change: '=',
   timeout: 'T',
 }
+
+// -- Dashboard Control Types --
+
+export interface ConfigValidationError {
+  field: string
+  message: string
+}
+
+export interface ValidateConfigResponse {
+  valid: boolean
+  errors: ConfigValidationError[]
+  warnings: string[]
+}
+
+export interface PreflightGpuInfo {
+  index: number
+  name: string | null
+  memory_total_mb: number | null
+  memory_free_mb: number | null
+  utilization_pct: number | null
+}
+
+export interface PreflightResult {
+  check: string
+  passed: boolean
+  message: string
+  detail?: string | null
+  suggestion?: string | null
+}
+
+export interface PreflightResponse {
+  passed: boolean
+  checks: PreflightResult[]
+  gpus: PreflightGpuInfo[]
+  duration_seconds: number
+}
+
+export interface CreateRunResponse {
+  run_id: string
+  status: string
+  message: string
+  config_errors: ConfigValidationError[]
+}
+
+export interface RunActionResponse {
+  run_id: string
+  action: string
+  success: boolean
+  message: string
+  previous_status: string | null
+  new_status: string | null
+}
+
+export interface RunStatusResponse {
+  run_id: string
+  status: string
+  is_active: boolean
+  pid: number | null
+  uptime_seconds: number | null
+}
