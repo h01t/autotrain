@@ -20,7 +20,7 @@ class TestParseResponse:
         result = parse_response(raw)
         assert result.reasoning == "test"
         assert len(result.changes) == 1
-        assert result.changes[0].file == "train.py"
+        assert result.changes[0].path == "train.py"
 
     def test_json_in_code_block(self):
         raw = """Here's my analysis:
@@ -59,7 +59,7 @@ class TestParseResponse:
             "changes": [{"file": "train.py", "search": "a", "replace": "b"}],
         })
         result = parse_response(raw)
-        assert result.changes[0].action == "replace"
+        assert result.changes[0].operation == "update"
 
     def test_multiple_changes(self):
         raw = json.dumps({

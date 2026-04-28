@@ -19,15 +19,16 @@ from autotrain.execution.local import LocalExecutor
 from autotrain.execution.ssh import SSHExecutor
 from autotrain.experiment.evaluator import is_improved, is_target_hit
 from autotrain.experiment.git_ops import (
-    commit,
     create_branch,
     has_uncommitted_changes,
     init_repo,
     revert_last_commit,
 )
 from autotrain.experiment.metrics import extract_metric_from_output, parse_epoch_line
+from autotrain.experiment.models import FileChange as PydanticFileChange
 from autotrain.experiment.sandbox import (
     FileChange,
+    apply_patch_set_atomically,
     format_rejection_message,
     validate_changes,
 )
@@ -54,6 +55,38 @@ from autotrain.storage.queries import (
 from autotrain.util.signals import is_shutting_down, register_shutdown_callback
 from autotrain.watchdog.gpu import query_gpu_local, query_gpu_ssh
 from autotrain.watchdog.monitor import WatchdogMonitor
+
+
+def _pydantic_to_legacy_changes(
+    pydantic_changes: list,
+) -> list:
+    """Convert Pydantic FileChange objects to legacy FileChange dataclasses.
+
+    This bridge exists so the legacy sandbox validation
+    (validate_changes with SandboxConfig) can still run against
+    the new Pydantic model output.
+    """
+    legacy = []
+    for pc in pydantic_changes:
+        if pc.operation == "delete":
+            legacy.append(FileChange(
+                file=pc.path,
+                action="full_rewrite",
+                content="",  # delete is not modeled in legacy
+            ))
+        elif pc.operation == "create":
+            legacy.append(FileChange(
+                file=pc.path,
+                action="create",
+                content=pc.content or "",
+            ))
+        elif pc.operation == "update":
+            legacy.append(FileChange(
+                file=pc.path,
+                action="full_rewrite",
+                content=pc.content or "",
+            ))
+    return legacy
 
 log = structlog.get_logger()
 
@@ -236,17 +269,20 @@ class AgentLoop:
                 self._sm.transition(AgentState.READING_STATE)
                 return
 
-            # 2. Apply changes
+            # 2. Apply changes atomically
             self._sm.transition(AgentState.APPLYING)
-            self._apply_changes(decision.changes)
-
-            # Sanitize hypothesis for commit message (strip newlines, limit length)
-            hyp = (decision.hypothesis or "no hypothesis").replace("\n", " ")[:80]
-            commit_hash = commit(
-                self._repo,
-                f"Iter {iteration_num}: {hyp}",
-                files=[c.file for c in decision.changes],
+            commit_hash = self._apply_changes_atomic(
+                decision.changes, iteration_num, decision.hypothesis,
             )
+            if commit_hash is None:
+                update_iteration(
+                    self._conn, iteration_id,
+                    outcome=IterationOutcome.SANDBOX_REJECTED,
+                    error_message="Atomic apply pipeline rejected changes",
+                )
+                self._last_error = "Atomic apply pipeline rejected changes"
+                self._sm.transition(AgentState.READING_STATE)
+                return
 
             # 3. Execute training
             self._sm.transition(AgentState.EXECUTING)
@@ -416,10 +452,11 @@ class AgentLoop:
                 rejection_msg = f"Parse error: {e}"
                 continue
 
-            # Validate
+            # Validate (legacy sandbox config checks)
             self._sm.transition(AgentState.VALIDATING)
+            legacy_changes = _pydantic_to_legacy_changes(decision.changes)
             result = validate_changes(
-                decision.changes, self._config.sandbox, current_files,
+                legacy_changes, self._config.sandbox, current_files,
             )
             if result.is_valid:
                 return decision, None
@@ -429,17 +466,36 @@ class AgentLoop:
 
         return None, rejection_msg
 
-    def _apply_changes(self, changes: list[FileChange]) -> None:
-        """Apply file changes to the repo."""
-        for change in changes:
-            filepath = self._repo / change.file
-            if change.action in ("create", "full_rewrite"):
-                filepath.write_text(change.content or "")
-            elif change.action == "replace" and filepath.exists():
-                content = filepath.read_text()
-                if change.search and change.search in content:
-                    content = content.replace(change.search, change.replace or "", 1)
-                    filepath.write_text(content)
+    def _apply_changes_atomic(
+        self, changes: list[PydanticFileChange], iteration_num: int, hypothesis: str,
+    ) -> str | None:
+        """Apply file changes atomically via the safety pipeline.
+
+        Returns the commit SHA on success, or None on failure (error
+        is logged and the iteration outcome is SANDBOX_REJECTED).
+        """
+        hyp = (hypothesis or "no hypothesis").replace("\n", " ")[:80]
+        result = apply_patch_set_atomically(
+            changes,
+            self._repo,
+            max_files=self._config.sandbox.max_changes_per_iteration,
+            max_total_bytes=self._config.sandbox.max_file_size_bytes,
+            commit_message=f"Iter {iteration_num}: {hyp}",
+        )
+        if result.success:
+            log.info(
+                "atomic_apply_success",
+                commit=result.commit_sha,
+                files=result.applied_paths,
+            )
+            return result.commit_sha
+
+        log.error(
+            "atomic_apply_failed",
+            error=result.error,
+            error_type=result.error_type,
+        )
+        return None
 
     def _run_training(self, iteration_num: int) -> str:
         """Execute training and collect output, capturing per-epoch metrics."""

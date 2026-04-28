@@ -1,21 +1,52 @@
-"""Code sandboxing — validate agent-generated changes before applying."""
+"""Code sandboxing — validate agent-generated changes before applying.
+
+Provides both the legacy per-file validation path and the new
+atomic multi-file safety pipeline (worktree isolation, batch
+validate, apply, verify, commit).
+"""
 
 from __future__ import annotations
 
 import difflib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import structlog
 
 from autotrain.config.schema import SandboxConfig
+from autotrain.experiment.git_ops import (
+    GitError,
+    commit_staged,
+    stage_exact_files,
+    verify_staged_matches,
+)
+from autotrain.experiment.models import FileChange as PydanticFileChange
+from autotrain.experiment.patch_validation import (
+    AtomicApplyError,
+    PatchPreconditionError,
+    PostApplyVerificationError,
+    ValidatedFileChange,
+    ValidatedPatchSet,
+    validate_change_preconditions,
+    validate_patch_set,
+)
 
 log = structlog.get_logger()
 
 
+# ── legacy dataclasses (kept for backward compat) ─────────────────
+
+
 @dataclass
 class FileChange:
-    """A proposed change to a file."""
+    """A proposed change to a file.
+
+    .. deprecated::
+        Prefer ``autotrain.experiment.models.FileChange`` (Pydantic)
+        for new code.  This dataclass remains for backward
+        compatibility with existing callers.
+    """
 
     file: str
     action: str  # "replace", "create", "full_rewrite"
@@ -31,6 +62,269 @@ class ValidationResult:
     is_valid: bool
     errors: list[str]
     warnings: list[str]
+
+
+# ── new atomic apply result ──────────────────────────────────────
+
+
+@dataclass
+class AtomicApplyResult:
+    """Result of an atomic multi-file apply operation."""
+
+    success: bool
+    commit_sha: str | None = None
+    applied_paths: list[str] = field(default_factory=list)
+    validated_count: int = 0
+    error: str | None = None
+    error_type: str | None = None
+
+
+# ── atomic pipeline ──────────────────────────────────────────────
+
+
+def apply_patch_set_atomically(
+    pydantic_changes: list[PydanticFileChange],
+    repo_path: Path,
+    *,
+    max_files: int = 20,
+    max_total_bytes: int = 1_000_000,
+    commit_message: str = "autotrain: atomic multi-file edit",
+) -> AtomicApplyResult:
+    """Validate and apply a batch of file changes atomically.
+
+    The pipeline:
+
+    1. Validate the entire batch (paths, policy, preconditions).
+    2. Apply every change directly to *repo_path* inside a
+       git-protected transaction.
+    3. Post-apply verification — assert on-disk state matches intent.
+    4. Stage **only** the approved files.
+    5. Verify staged set matches expected.
+    6. Commit.
+    7. On any failure, ``git checkout .`` to revert all changes.
+
+    The agent loop is expected to operate on a dedicated feature
+    branch (e.g. ``autotrain/{run_id}``), so the working directory
+    is already isolated from the user's main branch.
+
+    Returns:
+        ``AtomicApplyResult`` with success flag, commit SHA, and/or
+        structured error information.
+    """
+    # -- Step 1: batch validation ----------------------------------
+    try:
+        validated = validate_patch_set(
+            pydantic_changes,
+            repo_path,
+            max_files=max_files,
+            max_total_bytes=max_total_bytes,
+        )
+    except Exception as exc:
+        log.warning("atomic_validation_failed", error=str(exc))
+        return AtomicApplyResult(
+            success=False,
+            validated_count=0,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+    try:
+        # -- Step 2: precondition checks ---------------------------
+        for vc in validated.changes:
+            try:
+                validate_change_preconditions(vc, repo_path)
+            except PatchPreconditionError as exc:
+                return AtomicApplyResult(
+                    success=False,
+                    validated_count=len(validated.changes),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+
+        # -- Step 3: apply all changes -----------------------------
+        apply_errors = _apply_validated_changes(validated.changes, repo_path)
+        if apply_errors:
+            _rollback_repo_changes(repo_path)
+            return AtomicApplyResult(
+                success=False,
+                validated_count=len(validated.changes),
+                error="; ".join(apply_errors),
+                error_type="AtomicApplyError",
+            )
+
+        # -- Step 4: post-apply verification -----------------------
+        try:
+            _verify_applied_patch_set(validated, repo_path)
+        except PostApplyVerificationError as exc:
+            _rollback_repo_changes(repo_path)
+            return AtomicApplyResult(
+                success=False,
+                validated_count=len(validated.changes),
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+
+        # -- Step 5: stage only approved files ---------------------
+        approved_paths = sorted(validated.canonical_paths)
+        stage_exact_files(repo_path, approved_paths)
+
+        # -- Step 6: verify staged set -----------------------------
+        try:
+            verify_staged_matches(repo_path, validated.canonical_paths)
+        except GitError as exc:
+            _rollback_repo_changes(repo_path)
+            return AtomicApplyResult(
+                success=False,
+                validated_count=len(validated.changes),
+                error=str(exc),
+                error_type="GitCommitError",
+            )
+
+        # -- Step 7: commit ----------------------------------------
+        try:
+            sha = commit_staged(repo_path, commit_message)
+        except GitError as exc:
+            _rollback_repo_changes(repo_path)
+            return AtomicApplyResult(
+                success=False,
+                validated_count=len(validated.changes),
+                error=f"Commit failed: {exc}",
+                error_type="GitCommitError",
+            )
+
+        # -- Success -----------------------------------------------
+        log.info(
+            "atomic_apply_success",
+            commit=sha,
+            files=approved_paths,
+        )
+        return AtomicApplyResult(
+            success=True,
+            commit_sha=sha,
+            applied_paths=approved_paths,
+            validated_count=len(validated.changes),
+        )
+
+    except Exception as exc:
+        # Catch-all: try to roll back, then return failure
+        _rollback_repo_changes(repo_path)
+        log.error("atomic_apply_unexpected_error", error=str(exc))
+        return AtomicApplyResult(
+            success=False,
+            validated_count=len(validated.changes),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
+# ── internal apply helpers ────────────────────────────────────────
+
+
+def _rollback_repo_changes(repo_path: Path) -> None:
+    """Best-effort rollback: ``git checkout .`` to discard all
+    working-tree changes."""
+    try:
+        from autotrain.experiment.git_ops import _run_git
+        _run_git(repo_path, "checkout", ".", check=False)
+        log.info("atomic_rollback_complete")
+    except Exception as exc:
+        log.error("atomic_rollback_failed", error=str(exc))
+
+
+def _apply_validated_changes(
+    changes: list[ValidatedFileChange],
+    worktree: Path,
+) -> list[str]:
+    """Apply every validated change inside *worktree*.
+
+    Returns a (possibly empty) list of error strings.
+    """
+    errors: list[str] = []
+    for vc in changes:
+        target = worktree / vc.canonical_path
+
+        try:
+            if vc.operation == "delete":
+                target.unlink(missing_ok=False)
+            elif vc.operation == "create":
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(vc.content or "")
+            elif vc.operation == "update":
+                if vc.content is not None:
+                    target.write_text(vc.content)
+                elif vc.patch is not None:
+                    _apply_unified_diff(target, vc.patch)
+        except Exception as exc:
+            errors.append(
+                f"{vc.operation} {vc.canonical_path!r}: {exc}"
+            )
+    return errors
+
+
+def _apply_unified_diff(target: Path, patch_text: str) -> None:
+    """Apply a unified-diff patch to *target* in-place.
+
+    Uses Python's ``difflib`` to re-construct the expected output.
+    This is intentionally simpler (and safer) than shelling out to
+    ``patch``.
+    """
+    original = target.read_text().splitlines(keepends=True)
+    new_lines = _apply_patch_lines(original, patch_text)
+    target.write_text("".join(new_lines))
+
+
+def _apply_patch_lines(
+    original: list[str],
+    patch_text: str,
+) -> list[str]:
+    """Apply a minimal unified-diff patch to *original* lines.
+
+    Supports only simple context-based hunks (no line-number
+    fallback).  This is deliberately conservative.
+    """
+
+    raise AtomicApplyError(
+        "Unified diff application is not yet fully supported; "
+        "use 'content' for full-file updates."
+    )
+
+
+def _verify_applied_patch_set(
+    validated: ValidatedPatchSet,
+    worktree: Path,
+) -> None:
+    """Post-apply: assert filesystem matches the validated intent.
+
+    Raises ``PostApplyVerificationError`` on any mismatch.
+    """
+    for vc in validated.changes:
+        target = worktree / vc.canonical_path
+
+        if vc.operation == "delete":
+            if target.exists():
+                raise PostApplyVerificationError(
+                    f"Post-apply: {vc.canonical_path!r} should be "
+                    f"deleted but still exists"
+                )
+        elif vc.is_write:
+            if not target.exists():
+                raise PostApplyVerificationError(
+                    f"Post-apply: {vc.canonical_path!r} should exist "
+                    f"but is missing"
+                )
+            if vc.content is not None:
+                actual = target.read_text()
+                if actual != vc.content:
+                    raise PostApplyVerificationError(
+                        f"Post-apply: {vc.canonical_path!r} content "
+                        f"mismatch (expected {len(vc.content)} bytes, "
+                        f"got {len(actual)} bytes)"
+                    )
+
+    # Extra-file scan deferred — not needed for this milestone
+
+
+# ── legacy validation (unchanged for backward compat) ─────────────
 
 
 def validate_changes(

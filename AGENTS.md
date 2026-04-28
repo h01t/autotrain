@@ -89,6 +89,14 @@ Phase 3 → SaaS only after execution is fully containerized and hardened.
 - SSH/WebSocket connections must be authenticated in Phase 2+.  
 - No secrets in logs, no eval/exec unless explicitly whitelisted.
 
+
+**Atomic Multi-File Safety — Implementation Notes (added 2026-04)**
+- `src/autotrain/experiment/models.py` — Pydantic `FileChange` and `PatchRequest` models with strict operation semantics (`create`/`update`/`delete`; `rename` is deferred).  
+- `src/autotrain/experiment/patch_validation.py` — Centralized validation: path normalization, denylist, duplicate detection, precondition checks, batch limits.  
+- `src/autotrain/experiment/sandbox.py::apply_patch_set_atomically()` — Single entry point: validate → precondition → apply → verify → stage → commit. Rollback via `git checkout .` on any failure.  
+- `src/autotrain/agent/parser.py` — Supports dual JSON formats: legacy (`file`/`action`/`search`/`replace`) and Pydantic (`path`/`operation`/`content`/`patch`). Legacy `replace` maps to `update` with placeholder content.  
+- `src/autotrain/core/agent_loop.py` — Routes all edits through `apply_patch_set_atomically()`; per-file `_apply_changes()` replaced.  
+- `src/autotrain/experiment/git_ops.py` — Added `stage_exact_files()` (handles deletions via `git rm`), `staged_files()`, `verify_staged_matches()`, `commit_staged()`, `create_worktree()`/`remove_worktree()`.
 **Git Workflow**
 - `main` is always deployable.  
 - Rebase before PR.  

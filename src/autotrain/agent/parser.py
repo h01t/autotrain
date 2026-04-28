@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import structlog
 
-from autotrain.experiment.sandbox import FileChange
+from autotrain.experiment.models import FileChange as PydanticFileChange
 
 log = structlog.get_logger()
 
@@ -19,7 +19,7 @@ class AgentDecision:
 
     reasoning: str
     hypothesis: str
-    changes: list[FileChange]
+    changes: list[PydanticFileChange]
     expected_impact: str = "medium"
     raw_json: dict = field(default_factory=dict)
 
@@ -51,21 +51,8 @@ def parse_response(raw_text: str) -> AgentDecision:
     if not isinstance(data["changes"], list):
         raise ParseError("'changes' must be a list")
 
-    # Parse changes
-    changes = []
-    for change_data in data["changes"]:
-        if not isinstance(change_data, dict):
-            raise ParseError(f"Each change must be a dict, got: {type(change_data)}")
-        if "file" not in change_data:
-            raise ParseError("Each change must have a 'file' field")
-
-        changes.append(FileChange(
-            file=change_data["file"],
-            action=change_data.get("action", "replace"),
-            search=change_data.get("search"),
-            replace=change_data.get("replace"),
-            content=change_data.get("content"),
-        ))
+    # Parse changes — support both legacy and Pydantic formats
+    changes = _parse_changes(data["changes"])
 
     return AgentDecision(
         reasoning=data.get("reasoning", ""),
@@ -74,6 +61,84 @@ def parse_response(raw_text: str) -> AgentDecision:
         expected_impact=data.get("expected_impact", "medium"),
         raw_json=data,
     )
+
+
+def _parse_changes(raw_changes: list) -> list[PydanticFileChange]:
+    """Parse change dicts from agent JSON into Pydantic FileChange models.
+
+    Supports two formats:
+
+    *Legacy* (deprecated but still accepted):
+        {"file": "train.py", "action": "replace",
+         "search": "...", "replace": "..."}
+        {"file": "train.py", "action": "create"|"full_rewrite",
+         "content": "..."}
+
+    *Pydantic* (preferred):
+        {"path": "train.py", "operation": "update",
+         "content": "..."}
+        {"path": "new.py", "operation": "create",
+         "content": "..."}
+        {"path": "stale.py", "operation": "delete"}
+    """
+    from pydantic import ValidationError as PydanticValidationError
+
+    results: list[PydanticFileChange] = []
+    for cd in raw_changes:
+        if not isinstance(cd, dict):
+            raise ParseError(
+                f"Each change must be a dict, got: {type(cd)}"
+            )
+
+        # -- Pydantic format (preferred) --------------------------
+        if "path" in cd or "operation" in cd:
+            if "path" not in cd:
+                raise ParseError(
+                    "Pydantic-style change missing 'path' field"
+                )
+            try:
+                fc = PydanticFileChange(**cd)
+            except PydanticValidationError as e:
+                raise ParseError(
+                    f"Invalid FileChange: {e}"
+                ) from e
+            results.append(fc)
+            continue
+
+        # -- Legacy format (backward compat) ----------------------
+        if "file" not in cd:
+            raise ParseError(
+                "Each change must have 'file' (legacy) or 'path' (pydantic)"
+            )
+
+        action = cd.get("action", "replace")
+        if action in ("replace",):
+            search = cd.get("search", "")
+            if not search:
+                raise ParseError(
+                    "Legacy 'replace' action requires 'search' field"
+                )
+            # "replace" maps to "update" — content will be
+            # resolved by agent loop from current file state
+            results.append(PydanticFileChange(
+                path=cd["file"],
+                operation="update",
+                content="",  # placeholder; resolved by agent loop
+                description=cd.get("description"),
+            ))
+        elif action in ("create", "full_rewrite"):
+            results.append(PydanticFileChange(
+                path=cd["file"],
+                operation="create" if action == "create" else "update",
+                content=cd.get("content", ""),
+                description=cd.get("description"),
+            ))
+        else:
+            raise ParseError(
+                f"Unknown legacy action: {action!r}"
+            )
+
+    return results
 
 
 def _extract_json(text: str) -> str | None:
